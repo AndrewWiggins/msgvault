@@ -19,6 +19,7 @@ import (
 	"go.kenn.io/msgvault/internal/oauth"
 	"go.kenn.io/msgvault/internal/store"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 )
 
 var rootCmd = newRootCommand()
@@ -497,7 +498,7 @@ Or copy the file to your msgvault home directory:
 // if the root cause is a missing or unreadable secrets file.
 func wrapOAuthError(err error, cfg *config.Config) error {
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
-		return fmt.Errorf("OAuth client secrets file not accessible.%s", oauthSetupHint(cfg))
+		return fmt.Errorf("OAuth client secrets file not accessible: %w%s", errors.Join(oauth.ErrClientConfig, err), oauthSetupHint(cfg))
 	}
 	return err
 }
@@ -517,7 +518,6 @@ func isAuthInvalidError(err error) bool {
 // getTokenSourceWithReauth, making the function testable without real OAuth.
 type tokenReauthorizer interface {
 	TokenSource(ctx context.Context, email string) (oauth2.TokenSource, error)
-	HasToken(email string) bool
 	Authorize(ctx context.Context, email string) error
 	AuthorizeManual(ctx context.Context, email string) error
 }
@@ -531,19 +531,19 @@ type scopePreservingReauthorizer interface {
 // current grant: an account deliberately narrowed to read-only must not be
 // handed a command that would widen it again.
 type grantInspector interface {
-	GrantedScopes(email string) []string
+	GrantedScopes(ctx context.Context, email string) []string
 }
 
 // accountIsNarrowed reports whether the account's recorded grant is Gmail
 // read-only. A manager that cannot report scopes, or a grant with no Gmail
 // scopes at all, is treated as not narrowed, so guidance is unchanged for
 // every pre-existing case.
-func accountIsNarrowed(mgr tokenReauthorizer, email string) bool {
+func accountIsNarrowed(ctx context.Context, mgr tokenReauthorizer, email string) bool {
 	inspector, ok := mgr.(grantInspector)
 	if !ok {
 		return false
 	}
-	return oauth.IsNarrowedGmailGrant(inspector.GrantedScopes(email))
+	return oauth.IsNarrowedGmailGrant(inspector.GrantedScopes(ctx, email))
 }
 
 // readonlyFlagSuffix renders the grant-affecting flag for inclusion in
@@ -613,8 +613,8 @@ func getTokenSourceWithReauth(
 		return tokenSource, nil
 	}
 
-	// No token at all — user needs to run add-account
-	if !mgr.HasToken(email) {
+	// Missing or malformed token files need a new sign-in.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, oauth.ErrInvalidTokenJSON) {
 		return nil, fmt.Errorf("get token source: %w (run 'add-account %s' first)", err, email)
 	}
 
@@ -631,7 +631,7 @@ func getTokenSourceWithReauth(
 	// device-code instructions instead (--force is browser-only).
 	// Read the recorded grant before any reauthorization replaces it, so the
 	// guidance reflects what the account holds now.
-	narrowed := accountIsNarrowed(mgr, email)
+	narrowed := accountIsNarrowed(ctx, mgr, email)
 
 	if !interactive {
 		return nil, fmt.Errorf(
@@ -681,31 +681,102 @@ func authorizeManualForReauth(ctx context.Context, mgr tokenReauthorizer, email 
 // oauthManagerCache returns a resolver function that lazily creates and
 // caches oauth.Manager instances keyed by app name. The cache is safe
 // for concurrent use (serve runs scheduled syncs in goroutines).
-func oauthManagerCache(state *invocation) func(appName string) (*oauth.Manager, error) {
-	var mu sync.Mutex
-	managers := map[string]*oauth.Manager{}
-	return func(appName string) (*oauth.Manager, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if mgr, ok := managers[appName]; ok {
+func oauthManagerCache(state *invocation) func(ctx context.Context, appName string) (*oauth.Manager, error) {
+	cache := &oauthManagers{state: state, managers: map[string]*oauth.Manager{}}
+	return cache.get
+}
+
+// oauthManagers creates a manager per app. Creating one can run
+// client_secrets_command, so the mutex guards only the map. Concurrent callers
+// for one app share a single load, and each caller stops waiting when its own
+// context ends.
+type oauthManagers struct {
+	state    *invocation
+	mu       sync.Mutex
+	loads    singleflight.Group
+	managers map[string]*oauth.Manager
+	// joined lets tests wait until a caller is attached to the in-flight load.
+	joined func(appName string)
+}
+
+// loaderContextEndedError marks a shared load that stopped because the caller
+// that started it was cancelled or ran out of time, not because loading failed.
+type loaderContextEndedError struct{ err error }
+
+func (e *loaderContextEndedError) Error() string { return e.err.Error() }
+func (e *loaderContextEndedError) Unwrap() error { return e.err }
+
+func (c *oauthManagers) cached(appName string) (*oauth.Manager, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	mgr, ok := c.managers[appName]
+	return mgr, ok
+}
+
+func (c *oauthManagers) get(ctx context.Context, appName string) (*oauth.Manager, error) {
+	for {
+		if mgr, ok := c.cached(appName); ok {
 			return mgr, nil
 		}
-		if state == nil || state.cfg == nil || state.logger == nil {
-			return nil, errors.New("configuration is unavailable")
+		result := c.loads.DoChan(appName, func() (any, error) { return c.load(ctx, appName) })
+		if c.joined != nil {
+			c.joined(appName)
 		}
-		currentCfg := state.cfg
-		currentLogger := state.logger
-		secretsPath, err := currentCfg.OAuth.ClientSecretsFor(appName)
-		if err != nil {
-			return nil, err
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case loaded := <-result:
+			// The load ran under another caller's context. If that context
+			// ended, this caller loads again under its own.
+			if _, ended := errors.AsType[*loaderContextEndedError](loaded.Err); ended && ctx.Err() == nil {
+				continue
+			}
+			if loaded.Err != nil {
+				return nil, loaded.Err
+			}
+			mgr, ok := loaded.Val.(*oauth.Manager)
+			if !ok {
+				return nil, fmt.Errorf("load OAuth manager for %q: unexpected result %T", appName, loaded.Val)
+			}
+			return mgr, nil
 		}
-		mgr, err := oauth.NewManager(secretsPath, currentCfg.TokensDir(), currentLogger)
-		if err != nil {
-			return nil, wrapOAuthError(fmt.Errorf("create oauth manager: %w", err), currentCfg)
-		}
-		managers[appName] = mgr
+	}
+}
+
+// load runs once per app at a time. It checks the map again because a load
+// that finished just before this one began may already have published.
+func (c *oauthManagers) load(ctx context.Context, appName string) (*oauth.Manager, error) {
+	if mgr, ok := c.cached(appName); ok {
 		return mgr, nil
 	}
+	mgr, err := loadOAuthManager(ctx, c.state, appName)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, &loaderContextEndedError{err: err}
+		}
+		return nil, err
+	}
+	c.mu.Lock()
+	c.managers[appName] = mgr
+	c.mu.Unlock()
+	return mgr, nil
+}
+
+func loadOAuthManager(ctx context.Context, state *invocation, appName string) (*oauth.Manager, error) {
+	if state == nil || state.cfg == nil || state.logger == nil {
+		return nil, errors.New("configuration is unavailable")
+	}
+	cfg := state.cfg
+	credentials, err := cfg.OAuth.CredentialsFor(appName)
+	if err != nil {
+		return nil, errors.Join(oauth.ErrClientConfig, err)
+	}
+	mgr, err := oauth.NewManagerWithCredentials(ctx, credentials, cfg.TokensDir(), cfg.OAuth.Tokens,
+		state.logger, oauth.Scopes)
+	if err != nil {
+		return nil, wrapOAuthError(fmt.Errorf("create oauth manager: %w", err), cfg)
+	}
+	return mgr, nil
 }
 
 // sourceOAuthApp extracts the oauth app name from a Source, returning ""
