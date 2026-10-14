@@ -127,7 +127,7 @@ jobs:
       - name: Install SQLite development headers
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
-      # The three largest packages run in test-sharded; together these cover `make test`.
+      # test-sharded runs the three largest packages; test-unsharded runs the rest of `make test`.
       - name: Test
         run: make test-unsharded
 
