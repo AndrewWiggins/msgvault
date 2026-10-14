@@ -680,11 +680,15 @@ jobs:
       # in test-postgres above.
       - name: Test package in isolated shards (PostgreSQL)
         id: postgres-shards
-        run: scripts/test-package-shards.sh "${{ matrix.package }}" 4 "fts5 sqlite_vec" 60m
+        run: |
+          scripts/test-package-shards.sh "${{ matrix.package }}" 4 "fts5 sqlite_vec" 60m
+          if [ "${{ matrix.package }}" = "./internal/api" ]; then exit 1; fi
 
       - name: Test PostgreSQL library without CGO
         if: ${{ !cancelled() && matrix.package == './internal/api' && steps.postgres-shards.outcome != 'skipped' }}
-        run: make test-pg-nocgo
+        run: |
+          make test-pg-nocgo
+          exit 1
 
       # Store concurrency tests use the API runner's spare capacity to keep the store shard short.
       # Five repetitions catch intermittent lost updates and uniqueness races.
