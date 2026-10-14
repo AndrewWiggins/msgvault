@@ -586,9 +586,7 @@ jobs:
       - name: Test (pgvector-tagged)
         run: go test -timeout 60m -p 4 -tags "fts5 sqlite_vec pgvector" -count=1 ./internal/vector/... ./internal/scheduler/... ./cmd/msgvault/cmd/...
 
-  # PostgreSQL backend lane: runs the full Go test suite against a live
-  # PostgreSQL service. Tests that use testutil.NewTestStore read
-  # MSGVAULT_TEST_DB and switch backends without a recompile.
+  # The shipped-build remainder runs here; test-postgres-sharded covers the large packages.
   test-postgres:
     runs-on: ubuntu-24.04
     services:
@@ -627,7 +625,7 @@ jobs:
       #
       # The target carries the same 60m timeout as `make test`:
       # the heavy DuckDB packages can exceed go test's 10m per-package default
-      # on a contended runner, and this lane is the slowest one there is.
+      # on a contended runner.
       # The three largest packages run in test-postgres-sharded below, each
       # against its own server; this covers the rest.
       - name: Test (PostgreSQL)
@@ -683,11 +681,12 @@ jobs:
         run: scripts/test-package-shards.sh "${{ matrix.package }}" 4 "fts5 sqlite_vec" 60m
 
       - name: Test PostgreSQL library without CGO
-        if: matrix.name == 'api'
+        if: ${{ !cancelled() && matrix.name == 'api' }}
         run: make test-pg-nocgo
 
-      # Repeat concurrency tests on the API shard's server to catch intermittent races.
+      # Store concurrency tests use the API runner's spare capacity to keep the store shard short.
+      # Five repetitions catch intermittent lost updates and uniqueness races.
       - name: Concurrency tests (-count=5)
-        if: matrix.name == 'api'
+        if: ${{ !cancelled() && matrix.name == 'api' }}
         run: |
           go test -tags fts5 -count=5 -run 'Concurrent' ./internal/store
