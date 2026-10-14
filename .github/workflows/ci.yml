@@ -132,7 +132,7 @@ jobs:
         run: make test-unsharded
 
       - name: Test build without vector backends
-        run: go test -tags fts5 -run '^TestDocumentVectorStubKeepsStatusAvailableAndBuildActionable$' -count=1 ./cmd/msgvault/cmd
+        run: go test -tags fts5 -run '^TestDocumentVectorStubGenerationIsActionable$' -count=1 ./cmd/msgvault/cmd
 
   # The packages in SHARDED_TEST_PKGS (Makefile) each hold thousands of tests
   # that run one at a time inside one binary, so whole they set the wall clock
