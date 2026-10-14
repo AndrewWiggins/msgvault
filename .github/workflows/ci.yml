@@ -679,15 +679,16 @@ jobs:
       # Shipped build (no pgvector tag) against a stock postgres:16 image, as
       # in test-postgres above.
       - name: Test package in isolated shards (PostgreSQL)
+        id: postgres-shards
         run: scripts/test-package-shards.sh "${{ matrix.package }}" 4 "fts5 sqlite_vec" 60m
 
       - name: Test PostgreSQL library without CGO
-        if: ${{ !cancelled() && matrix.name == 'api' }}
+        if: ${{ !cancelled() && matrix.name == 'api' && steps.postgres-shards.outcome != 'skipped' }}
         run: make test-pg-nocgo
 
       # Store concurrency tests use the API runner's spare capacity to keep the store shard short.
       # Five repetitions catch intermittent lost updates and uniqueness races.
       - name: Concurrency tests (-count=5)
-        if: ${{ !cancelled() && matrix.name == 'api' }}
+        if: ${{ !cancelled() && matrix.name == 'api' && steps.postgres-shards.outcome != 'skipped' }}
         run: |
           go test -tags fts5 -count=5 -run 'Concurrent' ./internal/store
