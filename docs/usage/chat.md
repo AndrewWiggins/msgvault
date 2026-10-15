@@ -340,7 +340,7 @@ The MCP server exposes the following tools to connected AI clients:
 | `list_saved_views` | List persistent reusable Saved Views and their complete definitions. Read-only. | — |
 | `get_saved_view` | Get one Saved View and its canonical definition and revision. Read-only. | `id` (int, required) |
 | `run_saved_view` | Execute a Saved View through Explore without reconstructing its query. Returns typed entries, groups, or files. Read-only. | `id` (int, required), `limit` (int), `cursor` (string) |
-| `create_saved_view` | Create a persistent Saved View. Write-class. | `name` (string, required), `canonical_state` (object, required), `schema_version` (int, required; currently `1`), `description` (string) |
+| `create_saved_view` | Create a persistent Saved View. Write-class. | `name` (string, required), `canonical_state` (object, required), `schema_version` (int, required; use `2` for new definitions; schema `1` retains literal-pipe meaning), `description` (string) |
 | `update_saved_view` | Patch supplied Saved View fields using optimistic revision checking. Write-class. | `id` (int, required), `revision` (int, required), at least one of `name`, `description`, `canonical_state`, `schema_version` |
 | `delete_saved_view` | Delete a Saved View definition, not archive messages. Write-class and destructive. | `id` (int, required), `revision` (int, required) |
 | `stage_deletion` | Stage messages for deletion (creates manifest only) | `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string) |
@@ -473,7 +473,9 @@ whose surviving message belongs to another account's conversation. See
 
 Supported operators: `from:`, `to:`, `cc:`, `bcc:`, `subject:`, `label:` (or `l:`), `list:` (or `list-id:`), `has:attachment`, `before:`/`after:` (YYYY-MM-DD), `older_than:`/`newer_than:` (e.g. `7d`, `2w`, `1m`, `1y`), `larger:`/`smaller:` (e.g. `5M`), `received:`/`account:` (an exact confirmed address). Bare domains on `from:`/`to:` match any address at that domain. Different operators are ANDed; repeated List-Id operators require every literal substring, and repeated `account:` or `received:` values match any of them.
 
-Not supported: negation (`-has:attachment`), `OR`, or parentheses grouping.
+Use an unquoted `|` between complete searches for OR, for example `alpha beta | gamma`. Spaces bind before `|`. Quote a literal pipe as `"a | b"` or `'a | b'`. Queries allow up to 8 branches and OR results use date ordering. Pipe OR works in full-text message search; semantic, hybrid and exact body-only search read pipes as text.
+
+Negation (`-has:attachment`) and parentheses grouping remain unsupported.
 
 Free text in `search_metadata` matches subject, snippet, and sender/recipient metadata only. Use `search_message_bodies` for keyword body search or `semantic_search_messages` for vector/hybrid search over preprocessed subject and body content; both require at least one free-text term. Keyword matches literal words; semantic returns ranked messages with scored chunk excerpts. Keyword backend excerpts omit `char_offset` and `line` when the search backend does not provide efficient locations; semantic excerpts also commonly omit them because preprocessing rewrites message text. Use distinctive snippet terms with keyword `search_in_message` when raw-body navigation is needed.
 

@@ -39,7 +39,7 @@ type GetAggregatesQuery struct {
 	// HideDeleted Exclude deleted messages
 	HideDeleted *bool `json:"hide_deleted,omitempty"`
 
-	// SearchQuery Search query
+	// SearchQuery Search query; full text accepts standalone pipe-separated OR alternatives
 	SearchQuery *string `json:"search_query,omitempty"`
 
 	// After Lower date/time bound (RFC3339 or YYYY-MM-DD)
@@ -80,7 +80,7 @@ type GetSubAggregatesQuery struct {
 	// HideDeleted Exclude deleted messages
 	HideDeleted *bool `json:"hide_deleted,omitempty"`
 
-	// SearchQuery Search query
+	// SearchQuery Search query; full text accepts standalone pipe-separated OR alternatives
 	SearchQuery *string `json:"search_query,omitempty"`
 
 	// After Lower date/time bound (RFC3339 or YYYY-MM-DD)
@@ -259,7 +259,7 @@ type SearchCLIQuery struct {
 	// IncludeSnippet Include attachment names and bounded FTS match context
 	IncludeSnippet *bool `json:"include_snippet,omitempty"`
 
-	// Q Search query
+	// Q Search query; full text accepts standalone pipe-separated OR alternatives
 	Q string `json:"q" validate:"required"`
 
 	// Limit Maximum number of rows to return
@@ -1103,10 +1103,10 @@ type RunArchiveQueryQuery struct {
 }
 
 type SearchMessagesQuery struct {
-	// Q Search query
+	// Q Search query; fts accepts standalone pipe-separated OR alternatives; other modes read pipes as text
 	Q string `json:"q" validate:"required"`
 
-	// Mode Search mode: fts, vector, or hybrid. conversation_id applies in every mode; other structured filter parameters require vector or hybrid
+	// Mode Search mode: fts, vector, or hybrid. fts accepts standalone pipe-separated OR alternatives; other modes read pipes as text. conversation_id applies in every mode; other structured filter parameters require vector or hybrid
 	Mode *string `json:"mode,omitempty"`
 
 	// Page One-based page number (default 1; values below 1 are clamped to 1). Non-numeric values are rejected with 400.
@@ -1181,7 +1181,7 @@ func (s SearchMessagesQuery) Validate() error {
 }
 
 type DeepSearchQuery struct {
-	// Q Search query
+	// Q Search query; full text accepts standalone pipe-separated OR alternatives
 	Q string `json:"q" validate:"required"`
 
 	// Scope Exact search scope: body; omit for composite full-text search
@@ -1289,7 +1289,7 @@ func (s SearchMessagesByDomainsQuery) Validate() error {
 }
 
 type FastSearchQuery struct {
-	// Q Search query
+	// Q Search query; full text accepts standalone pipe-separated OR alternatives
 	Q string `json:"q" validate:"required"`
 
 	// ViewType Stats grouping view type
@@ -1404,7 +1404,7 @@ type GetTotalStatsQuery struct {
 	// SourceIds Source IDs; repeat the parameter for multiple sources
 	SourceIds []int64 `json:"source_ids,omitempty"`
 
-	// SearchQuery Search query
+	// SearchQuery Search query; full text accepts standalone pipe-separated OR alternatives
 	SearchQuery *string `json:"search_query,omitempty"`
 
 	// SearchScope Include all message types when the search has no explicit message_type

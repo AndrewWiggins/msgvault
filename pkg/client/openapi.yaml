@@ -4868,8 +4868,10 @@ components:
           x-enum-names:
             - ExploreGroupsHTTPRequestPresentationTable
         query:
+          description: Search query; full_text accepts standalone pipe-separated OR alternatives; other modes read pipes as text
           type: string
         search_mode:
+          description: Search mode; pipe OR is full_text only
           enum:
             - full_text
             - semantic
@@ -4943,8 +4945,10 @@ components:
             - ExploreHTTPRequestPresentationTimeline
             - ExploreHTTPRequestPresentationFiles
         query:
+          description: Search query; full_text accepts standalone pipe-separated OR alternatives; other modes read pipes as text
           type: string
         search_mode:
+          description: Search mode; pipe OR is full_text only
           enum:
             - full_text
             - semantic
@@ -15524,7 +15528,7 @@ components:
       type: apiKey
 info:
   title: msgvault API
-  version: 3.18.0
+  version: 3.19.0
 openapi: 3.0.3
 paths:
   /api/daemon/identity:
@@ -15832,7 +15836,7 @@ paths:
           name: hide_deleted
           schema:
             type: boolean
-        - description: Search query
+        - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: search_query
           schema:
@@ -15925,7 +15929,7 @@ paths:
           name: hide_deleted
           schema:
             type: boolean
-        - description: Search query
+        - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: search_query
           schema:
@@ -19028,7 +19032,7 @@ paths:
           name: include_snippet
           schema:
             type: boolean
-        - description: Search query
+        - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: q
           required: true
@@ -29309,6 +29313,7 @@ paths:
       tags:
         - API
     patch:
+      description: Sending canonical_state without schema_version keeps the stored schema version, so schema 1 keeps pipes as literal text. Send schema_version 2 to adopt pipe OR.
       operationId: patchSavedView
       parameters:
         - description: Saved View ID
@@ -29469,13 +29474,13 @@ paths:
     get:
       operationId: searchMessages
       parameters:
-        - description: Search query
+        - description: Search query; fts accepts standalone pipe-separated OR alternatives; other modes read pipes as text
           in: query
           name: q
           required: true
           schema:
             type: string
-        - description: "Search mode: fts, vector, or hybrid. conversation_id applies in every mode; other structured filter parameters require vector or hybrid"
+        - description: "Search mode: fts, vector, or hybrid. fts accepts standalone pipe-separated OR alternatives; other modes read pipes as text. conversation_id applies in every mode; other structured filter parameters require vector or hybrid"
           in: query
           name: mode
           schema:
@@ -29752,7 +29757,7 @@ paths:
     get:
       operationId: deepSearch
       parameters:
-        - description: Search query
+        - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: q
           required: true
@@ -29971,7 +29976,7 @@ paths:
     get:
       operationId: fastSearch
       parameters:
-        - description: Search query
+        - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: q
           required: true
@@ -31671,7 +31676,7 @@ paths:
               format: int64
               type: integer
             type: array
-        - description: Search query
+        - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: search_query
           schema:

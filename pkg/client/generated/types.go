@@ -4370,9 +4370,13 @@ type ExploreGroupsHTTPRequest struct {
 	Grouping     []ExploreGroupDimension               `json:"grouping" validate:"required,min=1,max=1"`
 	Limit        *int64                                `json:"limit,omitempty" validate:"omitempty,gte=0,lte=500"`
 	Presentation *ExploreGroupsHTTPRequestPresentation `json:"presentation,omitempty"`
-	Query        *string                               `json:"query,omitzero"`
-	SearchMode   *ExploreGroupsHTTPRequestSearchMode   `json:"search_mode,omitempty"`
-	Sort         []ExploreGroupSort                    `json:"sort,omitempty"`
+
+	// Query Search query; full_text accepts standalone pipe-separated OR alternatives; other modes read pipes as text
+	Query *string `json:"query,omitzero"`
+
+	// SearchMode Search mode; pipe OR is full_text only
+	SearchMode *ExploreGroupsHTTPRequestSearchMode `json:"search_mode,omitempty"`
+	Sort       []ExploreGroupSort                  `json:"sort,omitempty"`
 }
 
 func (e ExploreGroupsHTTPRequest) Validate() error {
@@ -4466,9 +4470,13 @@ type ExploreHTTPRequest struct {
 	Grouping            []ExploreGroupDimension         `json:"grouping,omitempty"`
 	Limit               *int64                          `json:"limit,omitempty" validate:"omitempty,gte=0,lte=500"`
 	Presentation        *ExploreHTTPRequestPresentation `json:"presentation,omitempty"`
-	Query               *string                         `json:"query,omitzero"`
-	SearchMode          *ExploreHTTPRequestSearchMode   `json:"search_mode,omitempty"`
-	Sort                []ExploreSort                   `json:"sort,omitempty"`
+
+	// Query Search query; full_text accepts standalone pipe-separated OR alternatives; other modes read pipes as text
+	Query *string `json:"query,omitzero"`
+
+	// SearchMode Search mode; pipe OR is full_text only
+	SearchMode *ExploreHTTPRequestSearchMode `json:"search_mode,omitempty"`
+	Sort       []ExploreSort                 `json:"sort,omitempty"`
 }
 
 func (e ExploreHTTPRequest) Validate() error {

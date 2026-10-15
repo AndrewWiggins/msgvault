@@ -158,7 +158,9 @@ recurrence limits, notification behavior, and reconciliation instructions.
 The API publishes its generated OpenAPI contract at `/openapi.json`.
 `msgvault openapi` prints the checked-in contract without starting a daemon or
 opening an archive. OpenAPI `info.version` is the **API schema version**;
-it is separate from the binary release version. The current schema is **3.18.0**.
+it is separate from the binary release version. The current schema is **3.19.0**.
+
+Schema 3.19.0 adds pipe-separated OR in full-text message search queries.
 Upgrade clients and daemon together across incompatible schema versions,
 including remote deployments.
 
@@ -2501,7 +2503,7 @@ by an agent without rebuilding its query.
 | `DELETE` | `/api/v1/saved-views/{id}` | Delete a view definition. Requires `If-Match`. Never touches archive messages. |
 | `POST` | `/api/v1/saved-views/{id}/run` | Execute a view through its canonical Explore definition. |
 
-`canonical_state` is a closed version-1 object. The daemon rejects a
+New definitions use `schema_version: 2`. The daemon reads schema 1 with pipes as literal text in full-text queries. `canonical_state` is a closed object. The daemon rejects a
 definition it could not execute, so every stored view can be opened by the
 Web UI and run by the API:
 
@@ -2581,7 +2583,7 @@ empty object `{}` is a valid body.
       "filters": [{"field": "source", "operator": "in", "values": ["1"]}],
       "presentation": "table"
     },
-    "schema_version": 1,
+    "schema_version": 2,
     "revision": 3,
     "created_at": "2026-07-19T10:00:00Z",
     "updated_at": "2026-07-19T11:00:00Z"

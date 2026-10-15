@@ -790,6 +790,7 @@ func (e ExploreGroupsHTTPRequestPresentation) Validate() error {
 	}
 }
 
+// ExploreGroupsHTTPRequestSearchMode Search mode; pipe OR is full_text only
 type ExploreGroupsHTTPRequestSearchMode string
 
 const (
@@ -826,6 +827,7 @@ func (e ExploreHTTPRequestPresentation) Validate() error {
 	}
 }
 
+// ExploreHTTPRequestSearchMode Search mode; pipe OR is full_text only
 type ExploreHTTPRequestSearchMode string
 
 const (
