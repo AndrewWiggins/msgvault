@@ -138,14 +138,42 @@ func attachmentMetadataJSON(m *Message, att *Attachment) string {
 	return string(b)
 }
 
+// assetNotFoundMaxAge gives recently sent media time to reach the bridge. A
+// message older than this that still gets a not-found response is eligible
+// to go terminal, but only once that outcome repeats on a separate, later
+// Import/BackfillMedia call (see isConfirmedAssetNotFound); a message
+// younger than this stays retryable no matter how many times the not-found
+// repeats. Accepted limit: two runs close enough together to land inside
+// one bridge outage can retire a file the bridge would otherwise have
+// recovered.
+const assetNotFoundMaxAge = 30 * 24 * time.Hour
+
+// isConfirmedAssetNotFound reports whether a not-found response for an old
+// message repeats a provisional miss already persisted by an earlier,
+// separate Import/BackfillMedia call (StateFailed/SkipSourceUnavailable). A
+// first-ever miss, or a miss whose last persisted outcome was something
+// else, is not confirmed: it is recorded as an ordinary retryable failure
+// instead.
+func isConfirmedAssetNotFound(previous store.AttachmentRef, timestamp, now time.Time) bool {
+	if previous.State != attachmentpolicy.StateFailed ||
+		previous.SkipReason != attachmentpolicy.SkipSourceUnavailable {
+		return false
+	}
+	return !timestamp.IsZero() && !timestamp.After(now.Add(-assetNotFoundMaxAge))
+}
+
 // persistAttachments downloads a message's media into content-addressed
 // storage and replaces the message's Beeper attachment rows. Media already
 // downloaded for this message (matched by source_attachment_id) is kept
 // as-is, so re-persisting a message never re-fetches its attachments; the
 // same holds for media the source reported as permanently unavailable. Failed
 // downloads and deliberate policy exclusions leave typed metadata markers;
-// BackfillMedia retries only outcomes allowed by the current policy. The
-// message itself is always archived regardless.
+// BackfillMedia retries only outcomes allowed by the current policy. A
+// not-found response costs one request and leaves a retryable marker; it
+// only becomes terminal once the message is old (assetNotFoundMaxAge) and a
+// later run's not-found confirms the previous run's provisional miss (see
+// isConfirmedAssetNotFound). The message itself is always archived
+// regardless.
 func (imp *Importer) persistAttachments(ctx context.Context, syncID, messageID int64, m *Message, opts ImportOptions, sum *ImportSummary) {
 	if imp.mediaFailures == nil {
 		imp.mediaFailures = make(map[mediaAttemptKey]store.AttachmentRef)
@@ -191,7 +219,7 @@ func (imp *Importer) persistAttachments(ctx context.Context, syncID, messageID i
 			continue
 		}
 		if hadPrevious && previous.State == attachmentpolicy.StateUnavailable {
-			// The source already said this media is gone for good.
+			// A previous download decision marked this media terminal.
 			previous.Metadata = attachmentMetadataJSON(m, att)
 			setBeeperAttachmentRole(&previous, att, isPreview)
 			refs = append(refs, previous)
@@ -218,7 +246,7 @@ func (imp *Importer) persistAttachments(ctx context.Context, syncID, messageID i
 		// Every unsuccessful fetch leaves a typed marker. Transient failures
 		// remain retryable; size exclusions wait until the cap is raised;
 		// media the source reports as permanently gone is terminal.
-		pend := func(status, kind string, sizeUnknown bool, err error) {
+		pend := func(status, kind string, sizeUnknown bool, skipReason attachmentpolicy.SkipReason, err error) {
 			newSizeSkip := status != store.SyncRunItemStatusSkipped || !hadPrevious ||
 				previous.State != attachmentpolicy.StateSkipped ||
 				previous.SkipReason != attachmentpolicy.SkipSizeCap ||
@@ -226,12 +254,11 @@ func (imp *Importer) persistAttachments(ctx context.Context, syncID, messageID i
 			if newSizeSkip {
 				imp.recordItem(syncID, m.ID, "attachment", status, kind, err)
 			}
+			marker.SkipReason = skipReason
 			if status == store.SyncRunItemStatusSkipped {
 				marker.State = attachmentpolicy.StateSkipped
-				marker.SkipReason = attachmentpolicy.SkipSizeCap
 			} else {
 				marker.State = attachmentpolicy.StateFailed
-				marker.SkipReason = attachmentpolicy.SkipFetchFailure
 			}
 			refs = append(refs, marker)
 			if marker.State == attachmentpolicy.StateSkipped {
@@ -247,14 +274,22 @@ func (imp *Importer) persistAttachments(ctx context.Context, syncID, messageID i
 			}
 		}
 		if opts.NoMedia || opts.AttachmentsDir == "" {
+			// A deferral never fetches, so it must not erase evidence an
+			// earlier real attempt already recorded: a provisional
+			// not-found marker survives untouched, so a later real run can
+			// still confirm or recover it instead of starting over.
+			if hadPrevious && previous.State == attachmentpolicy.StateFailed &&
+				previous.SkipReason == attachmentpolicy.SkipSourceUnavailable {
+				marker.State = previous.State
+				marker.SkipReason = previous.SkipReason
+			}
 			refs = append(refs, marker)
 			sum.AttachmentsPending++
 			continue
 		}
 		if reason := policy.Evaluate(opts.MediaConversation, int64(marker.Size)); reason != "" {
 			if reason == attachmentpolicy.SkipSizeCap {
-				marker.SkipReason = reason
-				pend(store.SyncRunItemStatusSkipped, "beeper_media_too_large", false,
+				pend(store.SyncRunItemStatusSkipped, "beeper_media_too_large", false, reason,
 					fmt.Errorf("attachment %s is %d bytes (cap %d)", ref, marker.Size, maxBytes))
 				continue
 			}
@@ -271,7 +306,7 @@ func (imp *Importer) persistAttachments(ctx context.Context, syncID, messageID i
 				observed = int64(att.FileSize)
 			}
 			marker.Size = attachmentpolicy.OversizeMarkerSize(maxBytes, observed)
-			pend(store.SyncRunItemStatusSkipped, "beeper_media_too_large", true,
+			pend(store.SyncRunItemStatusSkipped, "beeper_media_too_large", true, attachmentpolicy.SkipSizeCap,
 				fmt.Errorf("attachment %s is at least %d bytes (cap %d)", ref, marker.Size, maxBytes))
 			continue
 		}
@@ -283,26 +318,41 @@ func (imp *Importer) persistAttachments(ctx context.Context, syncID, messageID i
 			// The declared fileSize was absent or wrong; the capped reader
 			// caught it. Same outcome as the declared-size check above.
 			marker.Size = attachmentpolicy.OversizeMarkerSize(maxBytes, int64(marker.Size))
-			pend(store.SyncRunItemStatusSkipped, "beeper_media_too_large", true, err)
+			pend(store.SyncRunItemStatusSkipped, "beeper_media_too_large", true, attachmentpolicy.SkipSizeCap, err)
 			continue
 		}
-		if errors.Is(err, ErrAssetUnavailable) {
+		markUnavailable := func() {
 			marker.State = attachmentpolicy.StateUnavailable
 			marker.SkipReason = attachmentpolicy.SkipSourceUnavailable
 			imp.recordItem(syncID, m.ID, "attachment", store.SyncRunItemStatusSkipped, "beeper_media_unavailable", err)
 			refs = append(refs, marker)
 			sum.AttachmentsUnavailable++
+		}
+		if errors.Is(err, ErrAssetUnavailable) {
+			markUnavailable()
+			continue
+		}
+		if errors.Is(err, ErrAssetNotFound) {
+			if isConfirmedAssetNotFound(previous, m.Timestamp, time.Now()) {
+				markUnavailable()
+				continue
+			}
+			// First miss, or the last persisted outcome was not itself a
+			// provisional not-found: stay retryable, same as any other
+			// failure, so a later run can confirm or recover it.
+			pend(store.SyncRunItemStatusError, "beeper_media_error", false, attachmentpolicy.SkipSourceUnavailable, err)
+			imp.mediaFailures[attemptKey] = refs[len(refs)-1]
 			continue
 		}
 		if err != nil {
-			pend(store.SyncRunItemStatusError, "beeper_media_error", false, err)
+			pend(store.SyncRunItemStatusError, "beeper_media_error", false, attachmentpolicy.SkipFetchFailure, err)
 			imp.mediaFailures[attemptKey] = refs[len(refs)-1]
 			continue
 		}
 		ma := &mime.Attachment{Filename: att.FileName, ContentType: att.MimeType, Content: data}
 		storagePath, serr := export.StoreAttachmentFile(opts.AttachmentsDir, ma)
 		if serr != nil || storagePath == "" {
-			pend(store.SyncRunItemStatusError, "beeper_media_error", false, serr)
+			pend(store.SyncRunItemStatusError, "beeper_media_error", false, attachmentpolicy.SkipFetchFailure, serr)
 			imp.mediaFailures[attemptKey] = refs[len(refs)-1]
 			continue
 		}
