@@ -21,7 +21,7 @@ import (
 )
 
 func TestContextWorkerStagesShiftedWindowAcrossCancellation(t *testing.T) {
-	for _, change := range []string{"unchanged", "source revised", "wrong vector dimension", "anchor removed again"} {
+	for _, change := range []string{"fresh windows", "unchanged", "source revised", "wrong vector dimension", "anchor removed again"} {
 		t.Run(change, func(t *testing.T) {
 			assert := assert.New(t)
 			require := require.New(t)
@@ -32,18 +32,32 @@ func TestContextWorkerStagesShiftedWindowAcrossCancellation(t *testing.T) {
 			})
 			day := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
 			var ids []int64
-			for i := range 6 {
-				ids = append(ids, f.seed("beeper", f.chatID, day.Add(time.Duration(i)*time.Minute), "abcdefghij"))
+			if change == "fresh windows" {
+				for i := range 4 {
+					ids = append(ids,
+						f.seed("beeper", f.chatID, day.Add(time.Duration(i)*time.Hour), "first message"),
+						f.seed("beeper", f.chatID, day.Add(time.Duration(i)*time.Hour+time.Minute), "second message"))
+				}
+			} else {
+				for i := range 6 {
+					ids = append(ids, f.seed("beeper", f.chatID, day.Add(time.Duration(i)*time.Minute), "abcdefghij"))
+				}
+				_, err := f.run()
+				require.NoError(err)
 			}
-			_, err := f.run()
-			require.NoError(err)
 			scope := fmt.Sprintf("chat:%d:2026-08-08", f.chatID)
 			before, err := f.backend.ListDocumentsForScope(t.Context(), f.gen, scope)
 			require.NoError(err)
-			require.Len(before, 3)
-			require.Len(before[0].Members, 2)
-			_, err = f.store.DB().Exec(`UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, ids[0])
-			require.NoError(err)
+			completedBeforeCancel := int64(1)
+			if change == "fresh windows" {
+				require.Empty(before)
+				completedBeforeCancel = 3
+			} else {
+				require.Len(before, 3)
+				require.Len(before[0].Members, 2)
+				_, err = f.store.DB().Exec(`UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, ids[0])
+				require.NoError(err)
+			}
 			var requests atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var input voyageRequest
@@ -54,6 +68,9 @@ func TestContextWorkerStagesShiftedWindowAcrossCancellation(t *testing.T) {
 				if !assert.Len(input.Inputs, 1) {
 					http.Error(w, "invalid", http.StatusBadRequest)
 					return
+				}
+				if change == "fresh windows" {
+					assert.Len(input.Inputs[0], 2, "one document carries both messages in a window")
 				}
 				requests.Add(1)
 				data := make([]map[string]any, len(input.Inputs[0]))
@@ -67,7 +84,7 @@ func TestContextWorkerStagesShiftedWindowAcrossCancellation(t *testing.T) {
 			defer cancel()
 			f.deps.Client = NewVoyageClient(VoyageConfig{Endpoint: server.URL, Model: "synthetic", Dimension: 4, MaxRetries: 1,
 				Limits: RequestLimits{MaxDocuments: 1}, BeforeRequest: func(ctx context.Context) error {
-					if requests.Load() == 1 {
+					if requests.Load() == completedBeforeCancel {
 						cancel()
 					}
 					return ctx.Err()
@@ -78,9 +95,17 @@ func TestContextWorkerStagesShiftedWindowAcrossCancellation(t *testing.T) {
 			require.ErrorIs(err, context.Canceled)
 			after, err := f.backend.ListDocumentsForScope(t.Context(), f.gen, scope)
 			require.NoError(err)
-			assert.Equal(before, after, "old searchable membership survives an incomplete replacement")
+			assert.True(jobctx.HasProgress(ctx))
+			if change == "fresh windows" {
+				assert.Len(after, 3, "completed windows are durable before the next request")
+				assert.Equal(8, f.missing(), "coverage waits for the complete source scope")
+			} else {
+				assert.Equal(before, after, "old searchable membership survives an incomplete replacement")
+			}
 			expectedRequests := int64(3)
 			switch change {
+			case "fresh windows":
+				expectedRequests = 4
 			case "source revised":
 				require.NoError(f.store.UpsertMessageBody(ids[1], sql.NullString{String: "revised source", Valid: true}, sql.NullString{}))
 				expectedRequests = 4

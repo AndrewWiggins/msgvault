@@ -790,7 +790,7 @@ func TestClient_Embed_RejectsExtraOrDuplicateResponseItems(t *testing.T) {
 	}
 }
 
-func TestScheduledVectorPassRejectsRetryAfterWorkWindow(t *testing.T) {
+func TestScheduledVectorPassRejectsRetryAfterYield(t *testing.T) {
 	for _, provider := range []string{"openai", "voyage"} {
 		for _, preempt := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/preempt=%t", provider, preempt), func(t *testing.T) {

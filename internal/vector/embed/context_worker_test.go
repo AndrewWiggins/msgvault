@@ -57,6 +57,25 @@ type contextFenceRacePublisher struct {
 	beforeFence func() error
 }
 
+type cancellingBackstopPublisher struct {
+	vector.DocumentPublisher
+
+	cancel context.CancelCauseFunc
+	resets int
+}
+
+func (p *cancellingBackstopPublisher) ResetDocumentReconcileCursor(ctx context.Context, gen vector.GenerationID) error {
+	if p.cancel != nil {
+		p.cancel(jobctx.ErrYieldedToWaiter)
+		p.cancel = nil
+	}
+	if err := p.DocumentPublisher.ResetDocumentReconcileCursor(ctx, gen); err != nil {
+		return err
+	}
+	p.resets++
+	return nil
+}
+
 type contextFinalCursorPublisher struct {
 	vector.DocumentPublisher
 
@@ -2519,7 +2538,7 @@ func TestContextWorker_ReconcileSourceUsesBoundedRowPagesDespiteCurrentCoverage(
 	assert.Equal(t, 5, total, "source enumeration must not use embed_gen as its input filter")
 }
 
-func TestContextWorker_BackstopPreservesIncompleteReconciliationCursor(t *testing.T) {
+func TestContextWorker_BackstopPreservesCursorAcrossResetCancellationAndResume(t *testing.T) {
 	var pageRows []int
 	f := newContextWorkerFixture(t, func(deps *ContextWorkerDeps) {
 		deps.ReconcileBatchSize = 10
@@ -2537,6 +2556,20 @@ func TestContextWorker_BackstopPreservesIncompleteReconciliationCursor(t *testin
 	}
 	_, err = f.run()
 	require.NoError(t, err)
+	completedCursor := f.progress().ReconcileCursor
+	require.Contains(t, completedCursor, "done:")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	publisher := &cancellingBackstopPublisher{DocumentPublisher: f.backend, cancel: cancel}
+	f.deps.Publisher = publisher
+	f.restartWorker()
+	_, err = f.worker.RunBackstop(ctx, f.gen, testEmbeddingPassScope())
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, completedCursor, f.progress().ReconcileCursor, "failed reset preserves the completed cursor for the next backstop")
+	assert.Zero(t, publisher.resets)
+	_, err = f.worker.RunBackstop(t.Context(), f.gen, testEmbeddingPassScope())
+	require.NoError(t, err)
+	assert.Equal(t, 1, publisher.resets)
 	pageRows = nil
 	require.NoError(t, f.backend.SetDocumentReconcileCursor(t.Context(), f.gen,
 		"source:"+strconv.FormatInt(ids[0], 10)))

@@ -5,7 +5,6 @@ package scheduler
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -14,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
@@ -49,90 +47,6 @@ func (c *e2eClient) Embed(_ context.Context, inputs []string) ([][]float32, erro
 		out[i] = v
 	}
 	return out, nil
-}
-
-func (c *e2eClient) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
-	vectors, err := c.Embed(ctx, []string{text})
-	return vectors[0], err
-}
-
-func (c *e2eClient) EmbedDocuments(ctx context.Context, documents []embed.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
-	defer func() {
-		if checkpoint != nil && len(batchVectors) > 0 {
-			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
-		}
-	}()
-
-	vectors := make([][][]float32, len(documents))
-	for i, document := range documents {
-		var err error
-		vectors[i], err = c.Embed(ctx, document.Chunks)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return vectors, nil
-}
-
-type cancellingBackstopPublisher struct {
-	vector.DocumentPublisher
-
-	cancel context.CancelCauseFunc
-	resets int
-}
-
-func (p *cancellingBackstopPublisher) ResetDocumentReconcileCursor(ctx context.Context, gen vector.GenerationID) error {
-	if p.cancel != nil {
-		p.cancel(jobctx.ErrYieldedToWaiter)
-		p.cancel = nil
-	}
-	if err := p.DocumentPublisher.ResetDocumentReconcileCursor(ctx, gen); err != nil {
-		return err
-	}
-	p.resets++
-	return nil
-}
-
-func TestEmbedJob_Backstop_CancelBeforeCursorResetStaysDue(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	st := testutil.NewSQLiteTestStore(t)
-	source, err := st.GetOrCreateSource("test", "backstop@example.test")
-	require.NoError(err)
-	conversationID, err := st.EnsureConversation(source.ID, "backstop", "Checkpoint")
-	require.NoError(err)
-	messageID, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conversationID, SourceMessageID: "backstop", MessageType: "email", Subject: sql.NullString{String: "checkpoint", Valid: true}})
-	require.NoError(err)
-	require.NoError(st.UpsertMessageBody(messageID, sql.NullString{String: "synthetic body", Valid: true}, sql.NullString{}))
-	require.NoError(sqlitevec.RegisterExtension())
-	backend, err := sqlitevec.Open(t.Context(), sqlitevec.Options{Path: filepath.Join(t.TempDir(), "vectors.db"), MainDB: st.DB(), Dimension: 4})
-	require.NoError(err)
-	t.Cleanup(func() { _ = backend.Close() })
-	gen, err := backend.CreateGeneration(t.Context(), "synthetic", 4, "synthetic:4")
-	require.NoError(err)
-	publisher := &cancellingBackstopPublisher{DocumentPublisher: backend}
-	worker := embed.NewContextWorker(embed.ContextWorkerDeps{Checkpoints: vector.ChunkCheckpointStore{DB: backend.DB(), Rebind: func(q string) string { return q }}, Backend: backend, Publisher: publisher, Store: st, Assembler: embed.CompositeAssembler{}, Client: &e2eClient{dim: 4}, Recorder: st})
-	now := time.Date(2026, time.October, 6, 6, 0, 0, 0, time.UTC)
-	_, err = worker.RunOnce(t.Context(), gen, scheduledEmbeddingPassScope(now, gen, "seed"))
-	require.NoError(err)
-	require.NoError(backend.ActivateGeneration(t.Context(), gen, false))
-	job := &EmbedJob{Worker: worker, Backend: backend, Fingerprint: "synthetic:4", Convergence: &fakeConvergenceChecker{}, BackstopInterval: 24 * time.Hour, Now: func() time.Time { return now }}
-	require.NoError(job.run(t.Context()))
-	require.Equal(1, publisher.resets)
-
-	now = now.Add(25 * time.Hour)
-	ctx, cancel := context.WithCancelCause(t.Context())
-	defer cancel(nil)
-	publisher.cancel = cancel
-	require.ErrorIs(job.run(ctx), context.Canceled)
-	progress, err := backend.GetDocumentProgress(t.Context(), gen)
-	require.NoError(err)
-	assert.Contains(progress.ReconcileCursor, "done:")
-	require.Equal(1, publisher.resets)
-
-	now = now.Add(time.Minute)
-	require.NoError(job.run(t.Context()))
-	assert.Equal(2, publisher.resets, "a backstop cancelled before reset stays due")
 }
 
 func countMissingE2E(t *testing.T, db *sql.DB, gen int64) int {

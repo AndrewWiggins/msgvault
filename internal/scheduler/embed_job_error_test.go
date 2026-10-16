@@ -19,19 +19,22 @@ func (f convergenceCheckerFunc) CheckConvergence(ctx context.Context, gen vector
 	return f(ctx, gen)
 }
 
-func TestEmbedJobRunPreservesErrorsDuringInterruption(t *testing.T) {
+func TestEmbedJobRunHandlesInterruptedPhases(t *testing.T) {
 	failure := errors.New("independent database failure")
 	for _, test := range []struct {
 		name      string
 		configure func(*EmbedJob, *fakeBackend, context.CancelCauseFunc)
 	}{
-		{"backstop", func(job *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
-			backend.building = nil
-			backend.active = vector.Generation{ID: 42}
-			backend.activeErr = nil
-			job.Fingerprint = ""
+		{"reclaim", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
+			job.Worker = &fakeRunner{reclaimErr: failure, yieldReclaim: interrupt}
+		}},
+		{"backstop", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.BackstopInterval = 0
 			job.Worker = &fakeRunner{backstopErr: failure, yieldBackstop: interrupt}
+		}},
+		{"backstop success", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
+			job.BackstopInterval = 0
+			job.Worker = &fakeRunner{yieldBackstop: interrupt}
 		}},
 		{"interrupted RunOnce", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Worker = &fakeRunner{runErr: failure, yieldCancel: interrupt}
@@ -103,16 +106,19 @@ func TestEmbedJobRunPreservesErrorsDuringInterruption(t *testing.T) {
 				}
 				var logs bytes.Buffer
 				runner := &fakeRunner{}
+				coverage := &fakeCoverage{}
 				job := &EmbedJob{
 					Log:    slog.New(slog.NewTextHandler(&logs, nil)),
-					Worker: runner, Backend: backend, Store: &fakeCoverage{},
+					Worker: runner, Backend: backend, Store: coverage,
 					Fingerprint: "m:768", BackstopInterval: -1,
 				}
 				test.configure(job, backend, interrupt)
+				runner, ok := job.Worker.(*fakeRunner)
+				require.True(ok)
 
 				err := job.run(ctx)
 
-				if test.name == "activation success" {
+				if test.name == "activation success" || test.name == "backstop success" {
 					require.NoError(err)
 				} else {
 					require.ErrorIs(err, failure)
@@ -120,10 +126,29 @@ func TestEmbedJobRunPreservesErrorsDuringInterruption(t *testing.T) {
 				}
 				if interruption != "none" {
 					assert.NotContains(logs.String(), "generation lookup failed")
+					for _, message := range []string{"embed reclaim failed", "embed run failed", "convergence check after run failed", "embed backstop failed"} {
+						assert.NotContains(logs.String(), message)
+					}
+					if test.name == "interrupted RunOnce" || test.name == "reclaim" {
+						assert.NotContains(logs.String(), "embed run complete")
+					}
+					if test.name == "interrupted RunOnce" || test.name == "reclaim" || test.name == "backstop" || test.name == "backstop success" || test.name == "convergence before backstop" {
+						assert.Zero(coverage.calls)
+						assert.Empty(backend.activations())
+					}
 					assert.NotContains(logs.String(), "activation failed")
 					assert.NotContains(logs.String(), "building generation activated")
 					if test.name == "coverage" {
 						assert.Empty(backend.activations())
+					}
+					if test.name == "backstop" || test.name == "backstop success" {
+						assert.Contains(logs.String(), "embed run complete")
+						n, _ := runner.backstops()
+						assert.Equal(1, n)
+					}
+					if test.name == "reclaim" {
+						_, runs, _ := runner.calls()
+						assert.Zero(runs)
 					}
 					if test.name == "target building lookup" || test.name == "target active lookup" {
 						_, runs, _ := runner.calls()

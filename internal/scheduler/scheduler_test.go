@@ -898,91 +898,6 @@ func TestEmbedJob_Run_YieldedCleanRunStopsBeforeCompletionWork(t *testing.T) {
 	assert.NotContains(logs.String(), "embed run complete", "yield must not log completion")
 }
 
-func TestEmbedJob_Run_YieldedReclaimStopsWithoutWarning(t *testing.T) {
-	assert := assert.New(t)
-	backend := &fakeBackend{active: vector.Generation{ID: 5, State: vector.GenerationActive}}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	runner := &fakeRunner{
-		reclaimErr:   errors.New("reclaim operation failed"),
-		yieldReclaim: cancel,
-	}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker:  runner,
-		Backend: backend,
-		Log:     slog.New(slog.NewTextHandler(&logs, nil)),
-	}
-
-	job.Run(ctx)
-
-	_, run, _ := runner.calls()
-	assert.Equal(0, run, "RunOnce calls after yielded reclaim")
-	assert.NotContains(logs.String(), "embed reclaim failed", "yield must not log a reclaim warning")
-}
-
-func TestEmbedJob_Run_YieldedBackstopStopsBeforeActivationWork(t *testing.T) {
-	assert := assert.New(t)
-	building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
-	backend := &fakeBackend{activeErr: vector.ErrNoActiveGeneration, building: building}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	runner := &fakeRunner{yieldBackstop: cancel}
-	coverage := &fakeCoverage{}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker:      runner,
-		Backend:     backend,
-		Store:       coverage,
-		Fingerprint: "m:768",
-		Log:         slog.New(slog.NewTextHandler(&logs, nil)),
-	}
-
-	job.Run(ctx)
-
-	_, run, _ := runner.calls()
-	assert.Equal(1, run, "RunOnce calls")
-	n, _ := runner.backstops()
-	assert.Equal(1, n, "RunBackstop calls")
-	assert.Equal(0, coverage.calls, "coverage queries after yielded backstop")
-	assert.Empty(backend.activations(), "activation calls after yielded backstop")
-	assert.Contains(logs.String(), "embed run complete", "RunOnce completion is logged before backstop")
-	assert.NotContains(logs.String(), "embed backstop failed", "yield is not a backstop failure")
-	assert.NotContains(logs.String(), "building generation activated", "yield must stop activation")
-}
-
-func TestEmbedJob_Run_YieldedRunErrorStopsWithoutFailureWork(t *testing.T) {
-	assert := assert.New(t)
-	building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
-	backend := &fakeBackend{activeErr: vector.ErrNoActiveGeneration, building: building}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	runner := &fakeRunner{
-		runErr:      errors.New("operation failed"),
-		yieldCancel: cancel,
-	}
-	coverage := &fakeCoverage{}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker:      runner,
-		Backend:     backend,
-		Store:       coverage,
-		Fingerprint: "m:768",
-		Log:         slog.New(slog.NewTextHandler(&logs, nil)),
-	}
-
-	job.Run(ctx)
-
-	_, run, _ := runner.calls()
-	assert.Equal(1, run, "RunOnce calls")
-	n, _ := runner.backstops()
-	assert.Equal(0, n, "RunBackstop calls")
-	assert.Equal(0, coverage.calls, "coverage queries")
-	assert.Empty(backend.activations(), "activation calls")
-	assert.NotContains(logs.String(), "embed run failed", "yield must not log a failure")
-	assert.NotContains(logs.String(), "embed run complete", "yield must not log completion")
-}
-
 func TestEmbedJob_Run_ErrorWithoutYieldLogsFailure(t *testing.T) {
 	assert := assert.New(t)
 	backend := &fakeBackend{active: vector.Generation{ID: 5, State: vector.GenerationActive}}
@@ -1592,23 +1507,6 @@ func (c *fakeConvergenceChecker) CheckConvergence(context.Context, vector.Genera
 	return c.result, c.err
 }
 
-func TestEmbedJob_Run_YieldedConvergenceStopsWithoutWarning(t *testing.T) {
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	backend := &fakeBackend{building: &vector.Generation{ID: 7, Fingerprint: "m:768"}}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker: &fakeRunner{}, Backend: backend, Fingerprint: "m:768",
-		Convergence:      &fakeConvergenceChecker{cancel: cancel, err: errors.New("canceled query")},
-		BackstopInterval: -1, Log: slog.New(slog.NewTextHandler(&logs, nil)),
-	}
-
-	job.Run(ctx)
-
-	assert.Empty(t, backend.activations())
-	assert.NotContains(t, logs.String(), "convergence check after run failed")
-}
-
 func TestEmbedJob_Run_ContextualActivationRequiresEveryConvergenceDimension(t *testing.T) {
 	complete := ConvergenceResult{
 		MessageCoverageComplete: true,
@@ -1888,55 +1786,6 @@ func TestEmbedJob_Run_NilSafe(t *testing.T) {
 
 // ---------- SetEmbedJob tests ----------
 
-func TestSchedulerDocumentVectorJobRunsOnlyAfterSuccessfulSync(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		syncErr  error
-		wantRuns int64
-	}{
-		{name: "successful sync", wantRuns: 1},
-		{name: "failed sync", syncErr: errors.New("sync failed")},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				assertions := assert.New(t)
-				requirements := require.New(t)
-				syncDone := make(chan struct{})
-				s := New(func(context.Context, string) error {
-					close(syncDone)
-					return test.syncErr
-				})
-				var runs atomic.Int64
-				documentDone := make(chan struct{}, 1)
-				requirements.NoError(s.SetDocumentVectorJob(func(context.Context) error {
-					runs.Add(1)
-					documentDone <- struct{}{}
-					return nil
-				}, "", true))
-				requirements.NoError(s.AddAccount("test@example.test", "0 0 1 1 *"))
-				s.Start()
-				defer func() { <-s.Stop().Done() }()
-				requirements.NoError(s.TriggerSync("test@example.test"))
-				select {
-				case <-syncDone:
-				case <-time.After(time.Second):
-					requirements.Fail("sync did not complete")
-				}
-				if test.wantRuns == 1 {
-					select {
-					case <-documentDone:
-					case <-time.After(time.Second):
-						requirements.Fail("document vector job did not run")
-					}
-				} else {
-					synctest.Wait()
-				}
-				assertions.Equal(test.wantRuns, runs.Load())
-			})
-		})
-	}
-}
-
 func TestSchedulerVectorJobReplacesAndClearsCronEntry(t *testing.T) {
 	for _, name := range []string{"embed", "document-vector"} {
 		for _, removed := range []bool{false, true} {
@@ -1986,19 +1835,6 @@ func TestSchedulerVectorJobReplacesAndClearsCronEntry(t *testing.T) {
 	}
 }
 
-func TestScheduler_SetEmbedJob_InvalidCron(t *testing.T) {
-	s := New(func(ctx context.Context, email string) error { return nil })
-	backend := &fakeBackend{}
-	runner := &fakeRunner{}
-	job := &EmbedJob{Worker: runner, Backend: backend}
-
-	err := s.SetEmbedJob(job, "not a cron", false)
-	require.Error(t, err, "SetEmbedJob with invalid cron")
-	assert.Empty(t, s.cron.Entries(), "an invalid cron registers no entry")
-	_, err = s.StartJob("embed")
-	assert.ErrorContains(t, err, "not scheduled", "an invalid cron registers no job")
-}
-
 func TestSchedulerVectorJobInvalidReplacePreservesPrevious(t *testing.T) {
 	for _, name := range []string{"embed", "document-vector"} {
 		t.Run(name, func(t *testing.T) {
@@ -2014,6 +1850,10 @@ func TestSchedulerVectorJobInvalidReplacePreservesPrevious(t *testing.T) {
 					return s.SetDocumentVectorJob(run, schedule, afterSync)
 				}
 				original, rejected := 0, 0
+				require.Error(set(func(context.Context) error { rejected++; return nil }, "invalid", false))
+				assert.Empty(s.cron.Entries())
+				_, err := s.StartJob(name)
+				require.ErrorContains(err, "not scheduled")
 				require.NoError(set(func(context.Context) error { original++; return nil }, "*/5 * * * *", true))
 				previous := s.cron.Entries()
 				require.Len(previous, 1)
@@ -2031,46 +1871,6 @@ func TestSchedulerVectorJobInvalidReplacePreservesPrevious(t *testing.T) {
 			})
 		})
 	}
-}
-
-func TestScheduler_RunAfterSync_Fires(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	syncDone := make(chan struct{})
-	s := New(func(ctx context.Context, email string) error {
-		close(syncDone)
-		return nil
-	})
-	backend := &fakeBackend{active: vector.Generation{ID: 42}}
-	runDone := make(chan struct{})
-	runner := &fakeRunner{runDone: runDone}
-	job := &EmbedJob{Worker: runner, Backend: backend}
-
-	require.NoError(s.SetEmbedJob(job, "", true), "SetEmbedJob")
-	require.NoError(s.AddAccount("test@gmail.com", "0 0 1 1 *"), "AddAccount")
-
-	s.Start()
-	defer func() {
-		ctx := s.Stop()
-		<-ctx.Done()
-	}()
-
-	require.NoError(s.TriggerSync("test@gmail.com"), "TriggerSync")
-
-	select {
-	case <-syncDone:
-	case <-time.After(time.Second):
-		require.Fail("syncFunc did not run")
-	}
-	select {
-	case <-runDone:
-	case <-time.After(time.Second):
-		require.Fail("embed RunOnce did not fire after sync")
-	}
-
-	_, run, gen := runner.calls()
-	assert.Equal(1, run, "RunOnce calls")
-	assert.Equal(vector.GenerationID(42), gen, "RunOnce gen")
 }
 
 func TestScheduler_RunAfterSync_DisabledDoesNotFire(t *testing.T) {
@@ -3157,13 +2957,6 @@ func TestJobBudgetWithoutCheckpointReportsFailureAndWaitsForTick(t *testing.T) {
 	})
 }
 
-func TestBudgetFiltersCancellationCause(t *testing.T) {
-	ctx, cancel := context.WithTimeoutCause(t.Context(), 0, jobctx.ErrRunBudgetExceeded)
-	defer cancel()
-	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
-	assert.NoError(t, jobctx.ErrorAfterYield(ctx, context.Cause(ctx)))
-}
-
 func mustStartJob(tb testing.TB, s *Scheduler, name string) JobDisposition {
 	tb.Helper()
 	disp, err := s.StartJob(name)
@@ -3313,34 +3106,41 @@ func TestStartJobDroppedFollowUpIsLogged(t *testing.T) {
 }
 
 func TestSchedulerRunsEmbedAndDocumentVectorAfterSync(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(newSerialWorkTracker())
-		order := make(chan string, 8)
-		runner := &fakeRunner{onRunOnce: func(vector.GenerationID) {
-			assert.False(s.Status()[0].Running, "embedding has its own gate reservation")
-			order <- "embed"
-		}}
-		job := &EmbedJob{Worker: runner, Backend: &fakeBackend{active: vector.Generation{ID: 1}}}
-		require.NoError(s.SetEmbedJob(job, "", true))
-		require.NoError(s.SetDocumentVectorJob(func(context.Context) error {
-			assert.False(s.Status()[0].Running, "document indexing has its own gate reservation")
-			order <- "document vector"
-			return nil
-		}, "", true))
-		require.NoError(s.AddAccount("test@example.test", "0 0 1 1 *"))
-		s.Start()
-		defer func() { <-s.Stop().Done() }()
+	for _, syncErr := range []error{nil, errors.New("sync failed")} {
+		synctest.Test(t, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			s := New(func(context.Context, string) error { return syncErr }).WithWorkTracker(newSerialWorkTracker())
+			order := make(chan string, 8)
+			runner := &fakeRunner{onRunOnce: func(gen vector.GenerationID) {
+				assert.Equal(vector.GenerationID(1), gen)
+				assert.False(s.Status()[0].Running, "embedding has its own gate reservation")
+				order <- "embed"
+			}}
+			job := &EmbedJob{Worker: runner, Backend: &fakeBackend{active: vector.Generation{ID: 1}}}
+			require.NoError(s.SetEmbedJob(job, "", true))
+			require.NoError(s.SetDocumentVectorJob(func(context.Context) error {
+				assert.False(s.Status()[0].Running, "document indexing has its own gate reservation")
+				order <- "document vector"
+				return nil
+			}, "", true))
+			require.NoError(s.AddAccount("test@example.test", "0 0 1 1 *"))
+			s.Start()
+			defer func() { <-s.Stop().Done() }()
 
-		require.NoError(s.TriggerSync("test@example.test"))
-		synctest.Wait()
-		got := make([]string, 0, 2)
-		for len(order) > 0 {
-			got = append(got, <-order)
-		}
-		assert.ElementsMatch([]string{"embed", "document vector"}, got)
-	})
+			require.NoError(s.TriggerSync("test@example.test"))
+			synctest.Wait()
+			got := make([]string, 0, 2)
+			for len(order) > 0 {
+				got = append(got, <-order)
+			}
+			if syncErr == nil {
+				assert.ElementsMatch([]string{"embed", "document vector"}, got)
+			} else {
+				assert.Empty(got, "failed sync starts neither vector pass")
+			}
+		})
+	}
 }
 
 type labelRecordingTracker struct {
@@ -3446,5 +3246,38 @@ func TestGenericJobYieldWithProgressClearsEarlierFailure(t *testing.T) {
 		assert.Empty(t, status.LastError, "a pass that saved progress clears the earlier failure")
 		close(release)
 		synctest.Wait()
+	})
+}
+
+func TestGateQueueAge(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
+		gate := newSerialWorkTracker()
+		release, ok := gate.BeginWork()
+		require.True(ok)
+		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(gate)
+		defer func() { <-s.Stop().Done() }()
+		require.NoError(s.AddAccount("queued@example.test", "0 0 1 1 *"))
+		require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", Run: func(context.Context) error { return nil }}))
+		since := time.Now()
+		require.NoError(s.TriggerSync("queued@example.test"))
+		mustStartJob(t, s, "carddav")
+		synctest.Wait()
+		s.onAccountTick("queued@example.test")
+		s.onJobTick("carddav")
+		time.Sleep(preemptAfter)
+		for range 3 {
+			s.onAccountTick("queued@example.test")
+			s.onJobTick("carddav")
+		}
+		assert.Equal(since, s.Status()[0].QueuedSince)
+		assert.Equal(since, s.JobStatus()[0].QueuedSince)
+		assert.True(s.Status()[0].Queued)
+		assert.True(s.JobStatus()[0].Queued)
+		release()
+		synctest.Wait()
+		assert.True(s.Status()[0].QueuedSince.IsZero())
+		assert.True(s.JobStatus()[0].QueuedSince.IsZero())
 	})
 }

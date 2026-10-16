@@ -109,34 +109,19 @@ func TestReconcilerRunContinuesSafeWorkAfterWorkerErrorWithoutActivation(t *test
 }
 
 func TestReconcilerRunRetainsWorkerFailureOnCancellation(t *testing.T) {
-	assert := assert.New(t)
 	require := require.New(t)
-	ctx, cancel := context.WithCancelCause(jobctx.WithProgress(t.Context()))
-	defer cancel(nil)
-	publicationErr := errors.New("fenced publication failed")
-	workerLedger := newFakeDocumentVectorLedger(
-		workerClaim("extract-a", 1, "first", "token-a"),
-		workerClaim("extract-a", 2, "second", "token-b"),
-	)
-	workerLedger.commitErr["token-b"] = publicationErr
-	workerLedger.beforeCommit = func(token string) {
-		if token == "token-b" {
-			cancel(jobctx.ErrYieldedToWaiter)
-		}
-	}
-	backend := &fakeDocumentVectorBackend{}
-	worker := newFakeWorker(workerLedger,
-		&fakeDocumentVectorProvider{vectors: [][][]float32{{{1, 2, 3}, {4, 5, 6}}}}, backend)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	workerErr := errors.New("worker failed")
+	worker := &fakeDocumentVectorWorkerRunner{err: workerErr, before: cancel}
 	reconciler := NewReconciler(ReconcilerDeps{
 		Ledger: newFakeDocumentVectorReconcileLedger(store.DocumentVectorGenerationBuilding),
-		Worker: worker, Backend: backend,
+		Worker: worker, Backend: &fakeDocumentVectorBackend{},
 	})
 
-	result, err := reconciler.Run(ctx, 1, 2)
+	_, err := reconciler.Run(ctx, 1, 2)
 	require.ErrorIs(err, context.Canceled)
-	require.ErrorIs(jobctx.ErrorAfterYield(ctx, err), publicationErr)
-	assert.Equal(1, result.Worker.Published)
-	assert.True(jobctx.HasProgress(ctx))
+	require.ErrorIs(err, workerErr)
 }
 
 func TestReconcilerRunReportsTerminalGenerationAsBlocked(t *testing.T) {

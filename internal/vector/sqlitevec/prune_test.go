@@ -12,7 +12,7 @@ import (
 	"go.kenn.io/msgvault/internal/vector"
 )
 
-func TestBackend_PruneOrphanEmbeddingsRemovesOnlyHardDeletedMessages(t *testing.T) {
+func TestBackend_PrunesHardDeletedMessagesAndRetiredCheckpoints(t *testing.T) {
 	dir := t.TempDir()
 	mainPath := filepath.Join(dir, "main.db")
 	mainDB, err := sql.Open("sqlite3", mainPath)

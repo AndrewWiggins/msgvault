@@ -27,7 +27,7 @@ func TestPreemptionRequestVisibleThroughDerivedContexts(t *testing.T) {
 	assert.True(PreemptionRequested(context.WithoutCancel(ctx)))
 }
 
-func TestBudgetDenialPreservesIndependentError(t *testing.T) {
+func TestErrorAfterYieldPreservesIndependentError(t *testing.T) {
 	require := require.New(t)
 	independent := errors.New("publication failed")
 	require.NoError(ErrorAfterYield(t.Context(), ErrRunBudgetExceeded))

@@ -417,7 +417,7 @@ func TestCardDAVStatusAndRunsMapMissingDependenciesAndStorageFailureSafely(t *te
 	}
 }
 
-func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
+func TestCardDAVStatusReportsSelectedAndAggregateSchedulerState(t *testing.T) {
 	assertions := assert.New(t)
 	require := require.New(t)
 

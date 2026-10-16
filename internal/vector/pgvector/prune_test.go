@@ -10,7 +10,7 @@ import (
 	"go.kenn.io/msgvault/internal/vector"
 )
 
-func TestBackend_PruneOrphanEmbeddingsRemovesOnlyHardDeletedMessages(t *testing.T) {
+func TestBackend_PrunesHardDeletedMessagesAndRetiredCheckpoints(t *testing.T) {
 	backend, _, db := newBackendForTest(t)
 	_, err := db.Exec(`INSERT INTO messages (id) VALUES (2), (3)`)
 	require.NoError(t, err)
