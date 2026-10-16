@@ -11,6 +11,7 @@ import (
 
 	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/sourcescope"
 )
 
 // Every admitted read has either a source filter or an object-source check.
@@ -34,6 +35,9 @@ func agentReadDenied(permission agentgrant.Permission) *apiHTTPError {
 }
 
 func (s *Server) agentObjectSourceAllowed(r *http.Request, sourceID int64) bool {
+	if ids := sourcescope.IDs(r.Context()); ids != nil && !slices.Contains(ids, sourceID) {
+		return false
+	}
 	return s.requestAuthentication(r).Grant == nil || slices.Contains(agentReadSourceIDs(r), sourceID)
 }
 
@@ -55,9 +59,10 @@ func agentReadPermission(operation string, grant *agentgrant.Grant) (agentgrant.
 	return permission, nil
 }
 
-// agentReadConcurrency stays below the SQLite pool size (4) because each agent
-// read holds one connection for its snapshot; sync writes and owner reads keep the rest.
-const agentReadConcurrency = 2
+// readSnapshotConcurrency stays below the SQLite pool size (4) because each agent
+// or caller-scoped read holds one connection for its snapshot; sync writes and
+// owner reads keep the rest.
+const readSnapshotConcurrency = 2
 
 type agentReadSnapshotStore interface {
 	BeginReadSnapshotContext(ctx context.Context) (context.Context, func(), error)
@@ -73,7 +78,7 @@ func (s *Server) beginAgentRead(req *http.Request, operation string, grant *agen
 		return nil, newAPIHTTPError(http.StatusServiceUnavailable, "source_scope_unavailable", "Source authorization is unavailable")
 	}
 	select {
-	case s.agentReadSlots <- struct{}{}:
+	case s.readSnapshotSlots <- struct{}{}:
 	case <-req.Context().Done():
 		return nil, newAPIHTTPError(http.StatusServiceUnavailable, "agent_read_busy", "Agent reads are at capacity; retry later")
 	}
@@ -81,14 +86,14 @@ func (s *Server) beginAgentRead(req *http.Request, operation string, grant *agen
 	indexComplete := s.ftsIndexComplete.Load()
 	readContext, releaseSnapshot, err := snapshotStore.BeginReadSnapshotContext(req.Context())
 	if err != nil {
-		<-s.agentReadSlots
+		<-s.readSnapshotSlots
 		return nil, newAPIHTTPError(http.StatusServiceUnavailable, "source_scope_unavailable", "Source authorization is unavailable")
 	}
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
 			releaseSnapshot()
-			<-s.agentReadSlots
+			<-s.readSnapshotSlots
 		})
 	}
 	if boundary, ok := req.Context().Value(readResponseKey{}).(*readResponseWriter); ok {
