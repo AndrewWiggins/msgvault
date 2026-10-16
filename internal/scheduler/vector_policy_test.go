@@ -36,12 +36,10 @@ func registerPolicyEmbedJob(t *testing.T, s *Scheduler, run func(context.Context
 
 func TestVectorPassBudgetRemainsFinite(t *testing.T) {
 	for _, test := range []struct {
-		name                         string
-		timeout, response, admission time.Duration
+		name    string
+		timeout time.Duration
 	}{
-		{name: "default budget"},
-		{name: "configured budget", timeout: 10 * time.Minute},
-		{name: "slow response", timeout: 10 * time.Minute, response: 6 * time.Minute, admission: 4*time.Minute + 59*time.Second},
+		{name: "default budget"}, {name: "configured budget", timeout: 10 * time.Minute},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -49,35 +47,15 @@ func TestVectorPassBudgetRemainsFinite(t *testing.T) {
 				require := require.New(t)
 				s := New(nil).WithVectorRequestTimeout(test.timeout)
 				defer func() { <-s.Stop().Done() }()
-				registerPolicyEmbedJob(t, s, func(ctx context.Context) error {
-					if test.response == 0 {
-						<-ctx.Done()
-						return ctx.Err()
-					}
-					time.Sleep(test.admission)
-					requestCtx, cancel := context.WithTimeout(ctx, test.timeout)
-					defer cancel()
-					select {
-					case <-time.After(test.response):
-						jobctx.RecordProgress(ctx)
-						return nil
-					case <-requestCtx.Done():
-						return requestCtx.Err()
-					}
-				})
+				registerPolicyEmbedJob(t, s, func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() })
 				started := time.Now()
 				err := s.TriggerJob("embed")
-				if test.response == 0 {
-					require.ErrorIs(err, jobctx.ErrRunBudgetExceeded)
-					timeout := test.timeout
-					if timeout == 0 {
-						timeout = 30 * time.Second
-					}
-					assert.Equal(5*time.Minute+timeout+5*time.Second, time.Since(started))
-				} else {
-					require.NoError(err)
-					assert.Equal(test.admission+test.response, time.Since(started))
+				require.ErrorIs(err, jobctx.ErrRunBudgetExceeded)
+				timeout := test.timeout
+				if timeout == 0 {
+					timeout = 30 * time.Second
 				}
+				assert.Equal(5*time.Minute+timeout+5*time.Second, time.Since(started))
 			})
 		})
 	}

@@ -452,17 +452,26 @@ func TestWorker_YieldCancellationDuringUpsertStopsCleanly(t *testing.T) {
 func TestWorker_YieldCancellationDuringEmbedStopsCleanly(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
-	f := newWorkerFixture(t, 1)
-	ctx, cancel := context.WithCancelCause(context.Background())
+	f := newWorkerFixture(t, 5)
+	ctx, cancel := context.WithCancelCause(jobctx.WithProgress(t.Context()))
 	t.Cleanup(func() { cancel(nil) })
 	logs := &captureLogHandler{}
+	calls := 0
+	f.FakeClient.OnEmbed = func([]string) ([][]float32, error) {
+		calls++
+		if calls == 2 {
+			cancel(jobctx.ErrYieldedToWaiter)
+			return nil, ctx.Err()
+		}
+		return [][]float32{{1, 0, 0, 0}, {1, 0, 0, 0}}, nil
+	}
 	w := NewWorker(WorkerDeps{
 		Backend:                f.Backend,
 		VectorsDB:              f.VectorsDB,
 		MainDB:                 f.MainDB,
 		Store:                  f.Store,
-		Client:                 &yieldingEmbedClient{EmbeddingClient: f.FakeClient, cancel: cancel},
-		BatchSize:              1,
+		Client:                 f.FakeClient,
+		BatchSize:              2,
 		MaxConsecutiveFailures: 1,
 		Log:                    slog.New(logs),
 		Recorder:               f.Recorder,
@@ -470,14 +479,21 @@ func TestWorker_YieldCancellationDuringEmbedStopsCleanly(t *testing.T) {
 
 	res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
 	require.NoError(err, "yield cancellation during embed must stop cleanly")
-	assert.Equal(1, res.Claimed, "Claimed")
-	assert.Equal(0, res.Succeeded, "Succeeded")
+	assert.Equal(4, res.Claimed, "Claimed")
+	assert.Equal(2, res.Succeeded, "the first batch remains committed")
 	assert.Equal(0, res.Failed, "Failed")
-	assert.Equal(1, countMissing(t, f.MainDB, int64(f.BuildingGen)), "row remains unstamped")
+	assert.Equal(3, countMissing(t, f.MainDB, int64(f.BuildingGen)), "unfinished messages remain missing")
+	assert.True(jobctx.HasProgress(ctx))
 	for _, record := range logs.records {
 		assert.NotEqual(slog.LevelWarn, record.Level, "yield must not log a warning: %q", record.Message)
 		assert.NotEqual(slog.LevelError, record.Level, "yield must not log an error: %q", record.Message)
 	}
+
+	f.FakeClient.OnEmbed = nil
+	result, err := newTestWorker(f, 2).RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+	require.NoError(err)
+	assert.Equal(3, result.Succeeded, "resume embeds only unfinished messages")
+	assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)))
 }
 
 func TestWorker_YieldCancellationDuringDownshiftStampLogsOnce(t *testing.T) {
@@ -1106,25 +1122,8 @@ var _ interface {
 	ReclaimStale(ctx context.Context) (int, error)
 } = (*Worker)(nil)
 
-type checkpointInterruptClient struct {
-	EmbeddingClient
-
-	cancel context.CancelCauseFunc
-	cause  error
-	calls  int
-}
-
-func (c *checkpointInterruptClient) Embed(ctx context.Context, input []string) ([][]float32, error) {
-	c.calls++
-	if c.calls == 2 {
-		c.cancel(c.cause)
-		return nil, ctx.Err()
-	}
-	return c.EmbeddingClient.Embed(ctx, input)
-}
-
 func TestWorkerCommittedBatchSurvivesPassInterruption(t *testing.T) {
-	for _, cause := range []error{jobctx.ErrYieldedToWaiter, jobctx.ErrRunBudgetExceeded, nil} {
+	for _, cause := range []error{jobctx.ErrRunBudgetExceeded, nil} {
 		name := "cooperative yield"
 		if cause != nil {
 			name = cause.Error()
@@ -1133,8 +1132,7 @@ func TestWorkerCommittedBatchSurvivesPassInterruption(t *testing.T) {
 			assert := assert.New(t)
 			require := require.New(t)
 			f := newWorkerFixture(t, 5)
-			ctx, cancel := context.WithCancelCause(jobctx.WithProgress(t.Context()))
-			defer cancel(nil)
+			ctx := jobctx.WithProgress(t.Context())
 			worker := newTestWorker(f, 2)
 			worker.deps.MaxConsecutiveFailures = 1
 			calls := 0
@@ -1150,7 +1148,7 @@ func TestWorkerCommittedBatchSurvivesPassInterruption(t *testing.T) {
 					}
 					return vectors, nil
 				}
-			} else if errors.Is(cause, jobctx.ErrRunBudgetExceeded) {
+			} else {
 				f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
 					calls++
 					if calls == 2 {
@@ -1158,21 +1156,17 @@ func TestWorkerCommittedBatchSurvivesPassInterruption(t *testing.T) {
 					}
 					return [][]float32{{1, 0, 0, 0}, {1, 0, 0, 0}}, nil
 				}
-			} else {
-				worker.deps.Client = &checkpointInterruptClient{EmbeddingClient: f.FakeClient, cancel: cancel, cause: cause}
 			}
 			result, err := worker.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
 			if cause == nil {
 				require.NoError(err)
 				require.NoError(ctx.Err())
 				assert.Equal(1, calls)
-			} else if errors.Is(cause, jobctx.ErrRunBudgetExceeded) {
+			} else {
 				require.ErrorIs(err, cause)
 				require.NoError(ctx.Err())
 				assert.Equal(2, result.Succeeded)
 				assert.Zero(result.Failed, "a denied request leaves its messages unfinished")
-			} else {
-				require.ErrorIs(context.Cause(ctx), cause)
 			}
 			assert.True(jobctx.HasProgress(ctx))
 			assert.Equal(3, countMissing(t, f.MainDB, int64(f.BuildingGen)), "the first batch remains committed")
