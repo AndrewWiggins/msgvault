@@ -169,6 +169,7 @@ type SyncRunItemStatus struct {
 type SchedulerStatusResponse struct {
 	Running  bool            `json:"running"`
 	Accounts []AccountStatus `json:"accounts"`
+	Jobs     []JobStatus     `json:"jobs"`
 }
 
 // ErrorResponse represents an API error.
@@ -1828,9 +1829,14 @@ func (s *Server) handleSchedulerStatus(w http.ResponseWriter, r *http.Request) {
 		statuses = []AccountStatus{}
 	}
 
+	jobs := s.scheduler.JobStatus()
+	if jobs == nil {
+		jobs = []JobStatus{}
+	}
 	writeJSON(w, http.StatusOK, SchedulerStatusResponse{
 		Running:  s.scheduler.IsRunning(),
 		Accounts: statuses,
+		Jobs:     jobs,
 	})
 }
 

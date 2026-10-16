@@ -314,7 +314,8 @@ func newEmbeddingRuntime(vectorCfg vector.Config, deps embeddingRuntimeDeps) (*e
 		}
 		assembler := embed.CompositeAssembler{Policy: policy, Chat: embed.ChatWindowAssembler{Policy: policy}}
 		messageWorker := embed.NewContextWorker(embed.ContextWorkerDeps{
-			Backend: deps.Backend, Publisher: publisher, Store: deps.Store,
+			Checkpoints: vector.ChunkCheckpointStore{DB: deps.VectorsDB, Rebind: deps.Rebind},
+			Backend:     deps.Backend, Publisher: publisher, Store: deps.Store,
 			Assembler: assembler, Client: messageClient, BuildScope: vectorCfg.Embed.Scope.BuildScope(),
 			ChangeBatchSize:         vectorCfg.Embeddings.BatchSize,
 			ReconcileBatchSize:      vectorCfg.Embeddings.BatchSize,

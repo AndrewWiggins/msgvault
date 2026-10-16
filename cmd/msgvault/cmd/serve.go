@@ -170,8 +170,9 @@ func (s serveSchedulers) Stop() context.Context {
 // Media passes do not count as activity; shutdown cancels and drains them.
 func newServeSchedulers(
 	syncFunc scheduler.SyncFunc, logger *slog.Logger, idle scheduler.WorkTracker, gate api.LabeledOperationGate,
+	vectorRequestTimeout time.Duration,
 ) (*scheduler.Scheduler, *scheduler.Scheduler) {
-	sched := scheduler.New(syncFunc).WithLogger(logger).
+	sched := scheduler.New(syncFunc).WithLogger(logger).WithVectorRequestTimeout(vectorRequestTimeout).
 		WithWorkTracker(combineWorkTrackers(scheduleIdleWorkTracker(idle), labelWorkTracker(gate, "a scheduled sync")))
 	media := scheduler.New(nil).WithLogger(logger)
 	return sched, media
@@ -429,7 +430,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create and configure scheduler
-	sched, mediaSched := newServeSchedulers(syncFunc, logger, idleTracker, operationGate)
+	sched, mediaSched := newServeSchedulers(syncFunc, logger, idleTracker, operationGate, cfg.Vector.Embeddings.Timeout)
 	sched.WithAccountPreemptionPolicy(func(identifier string) bool {
 		return scheduledSyncPreemptible(s, identifier, logger)
 	})

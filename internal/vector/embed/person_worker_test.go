@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
@@ -21,8 +22,9 @@ import (
 )
 
 type personWorkerSource struct {
-	mu   sync.Mutex
-	docs map[int64]store.PersonSemanticDocument
+	mu    sync.Mutex
+	docs  map[int64]store.PersonSemanticDocument
+	scans int
 }
 
 func newPersonWorkerSource(docs ...store.PersonSemanticDocument) *personWorkerSource {
@@ -36,6 +38,7 @@ func newPersonWorkerSource(docs ...store.PersonSemanticDocument) *personWorkerSo
 func (s *personWorkerSource) ListPersonSemanticDocumentsContext(context.Context) ([]store.PersonSemanticDocument, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.scans++
 	documents := make([]store.PersonSemanticDocument, 0, len(s.docs))
 	for _, document := range s.docs {
 		documents = append(documents, document)
@@ -182,6 +185,7 @@ type poisonPersonWorkerClient struct {
 	calls          int
 	rejectAll      bool
 	rejectFromCall int
+	onEmbed        func()
 }
 
 func (c *poisonPersonWorkerClient) EmbedQuery(context.Context, string) ([]float32, error) {
@@ -189,9 +193,17 @@ func (c *poisonPersonWorkerClient) EmbedQuery(context.Context, string) ([]float3
 }
 
 func (c *poisonPersonWorkerClient) EmbedDocuments(
-	_ context.Context, documents []DocumentInput,
-) ([][][]float32, error) {
+	_ context.Context, documents []DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	c.calls++
+	if c.onEmbed != nil {
+		c.onEmbed()
+	}
 	for _, document := range documents {
 		if c.rejectAll || (c.rejectFromCall > 0 && c.calls >= c.rejectFromCall) ||
 			document.Chunks[0] == "Synthetic Reject" {
@@ -210,8 +222,13 @@ func (c *personWorkerClient) EmbedQuery(context.Context, string) ([]float32, err
 }
 
 func (c *personWorkerClient) EmbedDocuments(
-	_ context.Context, documents []DocumentInput,
-) ([][][]float32, error) {
+	_ context.Context, documents []DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	c.mu.Lock()
 	inputs := make([][]string, len(documents))
 	for i, document := range documents {
@@ -1106,4 +1123,95 @@ func TestGenerationWorkerBackstopMaintainsPeople(t *testing.T) {
 	must.NoError(err)
 	check.Equal([]vector.GenerationID{45}, messages.runBackstop)
 	check.Equal(RunResult{Claimed: 1, Succeeded: 1}, result)
+}
+
+// TestGenerationWorkerSkipsPeopleAfterPreemption catches a composed pass that
+// starts person provider calls after the message phase stopped for a yield.
+func TestGenerationWorkerSkipsPeopleAfterPreemption(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*GenerationWorker, context.Context) (RunResult, error)
+	}{
+		{name: "run once", run: func(w *GenerationWorker, ctx context.Context) (RunResult, error) {
+			return w.RunOnce(ctx, 44, testEmbeddingPassScope())
+		}},
+		{name: "backstop", run: func(w *GenerationWorker, ctx context.Context) (RunResult, error) {
+			return w.RunBackstop(ctx, 44, testEmbeddingPassScope())
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			check := assert.New(t)
+			must := require.New(t)
+			source := newPersonWorkerSource(personDocument(7, "rev-new", "Synthetic Waiting"))
+			backend := newPersonWorkerBackend()
+			client := &personWorkerClient{}
+			worker := NewGenerationWorker(&personWorkerMessageRunner{}, newTestPersonWorker(source, backend, client, 8))
+			ctx, requestPreemption := jobctx.WithPreemption(t.Context())
+			requestPreemption()
+
+			_, err := test.run(worker, ctx)
+			must.NoError(err)
+			check.Zero(source.scans, "the person phase does not start after a yield request")
+			check.Empty(client.calls, "no person provider call starts after a yield request")
+			revisions, err := backend.ListPersonRevisions(t.Context(), 44)
+			must.NoError(err)
+			check.Empty(revisions)
+		})
+	}
+}
+
+// TestPersonWorkerStopsBetweenBatchesAfterPreemption keeps the batch that was
+// already sent and leaves later batches for the resumed pass.
+func TestPersonWorkerStopsBetweenBatchesAfterPreemption(t *testing.T) {
+	check := assert.New(t)
+	must := require.New(t)
+	source := newPersonWorkerSource(
+		personDocument(8, "rev-first", "Synthetic First"),
+		personDocument(9, "rev-second", "Synthetic Second"),
+	)
+	backend := newPersonWorkerBackend()
+	ctx, requestPreemption := jobctx.WithPreemption(t.Context())
+	client := &personWorkerClient{onEmbed: requestPreemption}
+	worker := newTestPersonWorker(source, backend, client, 1)
+
+	_, err := worker.RunOnce(ctx, 45, testEmbeddingPassScope())
+	must.NoError(err)
+	check.Len(client.calls, 1, "the second batch waits for the resumed pass")
+	revisions, err := backend.ListPersonRevisions(t.Context(), 45)
+	must.NoError(err)
+	check.Equal(map[int64]string{8: "rev-first"}, revisions)
+}
+
+// TestPersonWorkerYieldDuringRejectedBatchStartsNoRecoveryCalls catches the
+// rejection path dispatching singleton retries or an endpoint probe after the
+// scheduler asked the pass to yield.
+func TestPersonWorkerYieldDuringRejectedBatchStartsNoRecoveryCalls(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		documents []store.PersonSemanticDocument
+	}{
+		{name: "multi-document batch skips singleton retries", documents: []store.PersonSemanticDocument{
+			personDocument(10, "rev-a", "Synthetic Rejected A"),
+			personDocument(11, "rev-b", "Synthetic Rejected B"),
+		}},
+		{name: "singleton rejection skips endpoint probe", documents: []store.PersonSemanticDocument{
+			personDocument(12, "rev-c", "Synthetic Rejected C"),
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			check := assert.New(t)
+			must := require.New(t)
+			backend := newPersonWorkerBackend()
+			ctx, requestPreemption := jobctx.WithPreemption(t.Context())
+			client := &poisonPersonWorkerClient{rejectAll: true, onEmbed: requestPreemption}
+			worker := newTestPersonWorker(newPersonWorkerSource(test.documents...), backend, client, 8)
+
+			_, err := worker.RunOnce(ctx, 46, testEmbeddingPassScope())
+			must.NoError(err)
+			check.Equal(1, client.calls, "no recovery call starts after the yield request")
+			revisions, err := backend.ListPersonRevisions(t.Context(), 46)
+			must.NoError(err)
+			check.Empty(revisions, "unprocessed people stay pending for the resumed pass")
+		})
+	}
 }

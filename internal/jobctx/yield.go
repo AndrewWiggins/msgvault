@@ -23,7 +23,7 @@ func ErrorAfterYield(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if YieldedToWaiter(ctx) || errors.Is(context.Cause(ctx), ErrRunBudgetExceeded) {
+	if YieldedToWaiter(ctx) || RunBudgetExpired(ctx) || errors.Is(err, ErrRunBudgetExceeded) {
 		_, filtered := filterYieldCancellation(err, errors.Is(ctx.Err(), context.DeadlineExceeded))
 		return filtered
 	}
@@ -77,7 +77,7 @@ func filterYieldCancellation(err error, deadlineExpired bool) (bool, error) {
 		}
 		return true, yieldFilteredError{message: message, cause: filtered}
 	}
-	if errors.Is(err, context.Canceled) || (deadlineExpired && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrRunBudgetExceeded))) || errors.Is(err, ErrYieldedToWaiter) {
+	if errors.Is(err, context.Canceled) || (deadlineExpired && errors.Is(err, context.DeadlineExceeded)) || errors.Is(err, ErrRunBudgetExceeded) || errors.Is(err, ErrYieldedToWaiter) {
 		return true, nil
 	}
 	return false, err

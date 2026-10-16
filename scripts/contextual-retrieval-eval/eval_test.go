@@ -1430,7 +1430,13 @@ func (c failingReplaySemanticClient) EmbedQuery(context.Context, string) ([]floa
 	return make([]float32, c.dimension), nil
 }
 
-func (failingReplaySemanticClient) EmbedDocuments(context.Context, []embed.DocumentInput) ([][][]float32, error) {
+func (failingReplaySemanticClient) EmbedDocuments(_ context.Context, _ []embed.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	return nil, errors.New("synthetic stress diagnostic failure")
 }
 
@@ -1450,7 +1456,13 @@ func (c *productionWorkerRecordingEmbedder) Embed(_ context.Context, inputs []st
 	return result, c.err
 }
 
-func (c *productionWorkerRecordingEmbedder) EmbedDocuments(context.Context, []embed.DocumentInput) ([][][]float32, error) {
+func (c *productionWorkerRecordingEmbedder) EmbedDocuments(_ context.Context, _ []embed.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	return nil, errors.New("O-prod must not use contextual document embedding")
 }
 
@@ -1470,7 +1482,13 @@ func (c *ftsRankingEmbedder) EmbedQuery(_ context.Context, _ string) ([]float32,
 	return result, c.err
 }
 
-func (c *ftsRankingEmbedder) EmbedDocuments(_ context.Context, documents []embed.DocumentInput) ([][][]float32, error) {
+func (c *ftsRankingEmbedder) EmbedDocuments(_ context.Context, documents []embed.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	result := make([][][]float32, len(documents))
 	for i, document := range documents {
 		result[i] = make([][]float32, len(document.Chunks))
@@ -1492,7 +1510,13 @@ func (c *contextualEvidenceEmbedder) EmbedQuery(_ context.Context, _ string) ([]
 	return result, c.err
 }
 
-func (c *contextualEvidenceEmbedder) EmbedDocuments(_ context.Context, documents []embed.DocumentInput) ([][][]float32, error) {
+func (c *contextualEvidenceEmbedder) EmbedDocuments(_ context.Context, documents []embed.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	result := make([][][]float32, len(documents))
 	for i, document := range documents {
 		result[i] = make([][]float32, len(document.Chunks))
@@ -1514,7 +1538,13 @@ func (c *fixedDimensionEmbedder) EmbedQuery(_ context.Context, _ string) ([]floa
 	return result, c.err
 }
 
-func (c *fixedDimensionEmbedder) EmbedDocuments(_ context.Context, documents []embed.DocumentInput) ([][][]float32, error) {
+func (c *fixedDimensionEmbedder) EmbedDocuments(_ context.Context, documents []embed.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	result := make([][][]float32, len(documents))
 	for i, document := range documents {
 		result[i] = make([][]float32, len(document.Chunks))
@@ -1526,7 +1556,13 @@ func (c *fixedDimensionEmbedder) EmbedDocuments(_ context.Context, documents []e
 	return result, c.err
 }
 
-func (c *batchRecordingEmbedder) EmbedDocuments(_ context.Context, documents []embed.DocumentInput) ([][][]float32, error) {
+func (c *batchRecordingEmbedder) EmbedDocuments(_ context.Context, documents []embed.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	c.batchSizes = append(c.batchSizes, len(documents))
 	result := make([][][]float32, len(documents))
 	for i, document := range documents {

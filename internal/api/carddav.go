@@ -832,6 +832,9 @@ type CardDAVStatusResponse struct {
 	Available            bool                  `json:"available"`
 	CredentialConfigured bool                  `json:"credential_configured"`
 	Enabled              bool                  `json:"enabled"`
+	WaitingForGate       bool                  `json:"waiting_for_gate"`
+	SchedulerRunning     bool                  `json:"scheduler_running"`
+	QueuedSince          *time.Time            `json:"queued_since,omitempty"`
 	Scheduled            bool                  `json:"scheduled"`
 	Schedule             string                `json:"schedule"`
 	NextScheduledAt      *time.Time            `json:"next_scheduled_at,omitempty"`
@@ -1082,6 +1085,10 @@ func (s *Server) handleCardDAVStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid connection selector")
 		return
 	}
+	var jobStatuses []JobStatus
+	if s.scheduler != nil && s.scheduler.IsRunning() {
+		jobStatuses = s.scheduler.JobStatus()
+	}
 	status, err := s.cardDAV.Status(r.Context(), name)
 	if err != nil {
 		if errors.Is(err, errCardDAVValidation) {
@@ -1093,7 +1100,7 @@ func (s *Server) handleCardDAVStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if s.scheduler != nil && s.scheduler.IsRunning() {
+	if len(jobStatuses) != 0 {
 		jobs := map[string]bool{}
 		if present {
 			jobs[CardDAVJobNameForConnection(name)] = true
@@ -1103,11 +1110,19 @@ func (s *Server) handleCardDAVStatus(w http.ResponseWriter, r *http.Request) {
 				jobs[CardDAVJobNameForConnection(connection)] = true
 			}
 		}
-		for _, job := range s.scheduler.JobStatus() {
+		for _, job := range jobStatuses {
 			if !jobs[job.Name] {
 				continue
 			}
 			status.Scheduled = true
+			status.SchedulerRunning = status.SchedulerRunning || job.Running
+			if job.Queued {
+				status.WaitingForGate = true
+				if !job.QueuedSince.IsZero() && (status.QueuedSince == nil || job.QueuedSince.Before(*status.QueuedSince)) {
+					since := job.QueuedSince
+					status.QueuedSince = &since
+				}
+			}
 			if !job.NextRun.IsZero() && (status.NextScheduledAt == nil || job.NextRun.Before(*status.NextScheduledAt)) {
 				next := job.NextRun
 				status.NextScheduledAt = &next

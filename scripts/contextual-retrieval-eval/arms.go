@@ -120,7 +120,13 @@ func (c *replaySemanticClient) EmbedQuery(context.Context, string) ([]float32, e
 	return make([]float32, c.dimension), nil
 }
 
-func (c *replaySemanticClient) EmbedDocuments(_ context.Context, documents []embed.DocumentInput) ([][][]float32, error) {
+func (c *replaySemanticClient) EmbedDocuments(_ context.Context, documents []embed.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	c.documents += len(documents)
 	c.attempts++
 	result := make([][][]float32, len(documents))
@@ -380,8 +386,9 @@ func runReplayMode(ctx context.Context, parent string, events []replayEvent, mod
 			return replayPathStats{}, replayTrace{}, errors.New("contextual replay requires semantic client")
 		}
 		worker := embed.NewContextWorker(embed.ContextWorkerDeps{Backend: backend, Publisher: backend, Store: st,
-			Assembler: embed.CompositeAssembler{Policy: policy, Chat: embed.ChatWindowAssembler{Policy: policy}},
-			Client:    semantic, ChangeBatchSize: 64, ReconcileBatchSize: 128, Recorder: st})
+			Checkpoints: vector.ChunkCheckpointStore{DB: backend.DB(), Rebind: st.Rebind},
+			Assembler:   embed.CompositeAssembler{Policy: policy, Chat: embed.ChatWindowAssembler{Policy: policy}},
+			Client:      semantic, ChangeBatchSize: 64, ReconcileBatchSize: 128, Recorder: st})
 		runOnce = worker.RunOnce
 	}
 	before := replayUsageSnapshot(client, observer)
@@ -1091,7 +1098,7 @@ func productionOldChunks(subject, body string) ([]string, error) {
 }
 
 type documentEmbedder interface {
-	EmbedDocuments(ctx context.Context, documents []embed.DocumentInput) ([][][]float32, error)
+	EmbedDocuments(ctx context.Context, documents []embed.DocumentInput, checkpoint func([][][]float32) error) ([][][]float32, error)
 }
 
 type armIndex struct {
@@ -1162,8 +1169,9 @@ func buildFreshArmIndex(ctx context.Context, dir, arm string, documents []ArmDoc
 		}
 		policy := evaluationAssemblyPolicy()
 		worker := embed.NewContextWorker(embed.ContextWorkerDeps{Backend: backend, Publisher: backend, Store: mainStore,
-			Assembler: embed.CompositeAssembler{Policy: policy, Chat: embed.ChatWindowAssembler{Policy: policy}},
-			Client:    semantic, ChangeBatchSize: 64, ReconcileBatchSize: 128, Recorder: mainStore})
+			Checkpoints: vector.ChunkCheckpointStore{DB: backend.DB(), Rebind: mainStore.Rebind},
+			Assembler:   embed.CompositeAssembler{Policy: policy, Chat: embed.ChatWindowAssembler{Policy: policy}},
+			Client:      semantic, ChangeBatchSize: 64, ReconcileBatchSize: 128, Recorder: mainStore})
 		if _, err := runContextWorkerUntilConverged(ctx, worker, generation,
 			"contextual-eval:index:"+arm); err != nil {
 			return fail(fmt.Errorf("run production N-c4 context worker: %w", err))
@@ -1289,7 +1297,7 @@ func streamEmbedArmDocuments(ctx context.Context, generation vector.GenerationID
 			}
 		}
 		requestStart := time.Now()
-		vectors, err := client.EmbedDocuments(ctx, inputs)
+		vectors, err := client.EmbedDocuments(ctx, inputs, nil)
 		latencies = append(latencies, time.Since(requestStart))
 		if err != nil {
 			return latencies, err
@@ -1446,7 +1454,7 @@ func embedDocumentBatches(ctx context.Context, inputs []embed.DocumentInput, bat
 	for startIndex := 0; startIndex < len(inputs); startIndex += batchSize {
 		endIndex := min(startIndex+batchSize, len(inputs))
 		embedStart := time.Now()
-		batch, err := client.EmbedDocuments(ctx, inputs[startIndex:endIndex])
+		batch, err := client.EmbedDocuments(ctx, inputs[startIndex:endIndex], nil)
 		latencies = append(latencies, time.Since(embedStart))
 		if err != nil {
 			return nil, latencies, err

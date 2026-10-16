@@ -54,15 +54,16 @@ type AccountScope struct {
 }
 
 type AccountStatus struct {
-	Email     string     `json:"email" validate:"required"`
-	LastError *string    `json:"last_error,omitzero"`
-	LastRun   *time.Time `json:"last_run,omitempty"`
-	NextRun   time.Time  `json:"next_run" validate:"required"`
-	Pending   *bool      `json:"pending,omitempty"`
-	Queued    *bool      `json:"queued,omitempty"`
-	Running   bool       `json:"running"`
-	Schedule  string     `json:"schedule" validate:"required"`
-	StartedAt *time.Time `json:"started_at,omitempty"`
+	Email       string     `json:"email" validate:"required"`
+	LastError   *string    `json:"last_error,omitzero"`
+	LastRun     *time.Time `json:"last_run,omitempty"`
+	NextRun     time.Time  `json:"next_run" validate:"required"`
+	Pending     *bool      `json:"pending,omitempty"`
+	Queued      *bool      `json:"queued,omitempty"`
+	QueuedSince *time.Time `json:"queued_since,omitempty"`
+	Running     bool       `json:"running"`
+	Schedule    string     `json:"schedule" validate:"required"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
 }
 
 func (a AccountStatus) Validate() error {
@@ -1941,9 +1942,12 @@ type CardDAVStatusResponse struct {
 	Latest               *CardDAVRunResponse                `json:"latest,omitempty"`
 	LatestSuccessful     *CardDAVRunResponse                `json:"latest_successful,omitempty"`
 	NextScheduledAt      *time.Time                         `json:"next_scheduled_at,omitempty"`
+	QueuedSince          *time.Time                         `json:"queued_since,omitempty"`
 	RepairReason         *CardDAVStatusResponseRepairReason `json:"repair_reason,omitempty"`
 	Schedule             string                             `json:"schedule" validate:"required"`
 	Scheduled            bool                               `json:"scheduled"`
+	SchedulerRunning     bool                               `json:"scheduler_running"`
+	WaitingForGate       bool                               `json:"waiting_for_gate"`
 }
 
 func (c CardDAVStatusResponse) Validate() error {
@@ -6436,6 +6440,33 @@ func (i ImportResult) Validate() error {
 	}
 	if err := typesValidator.Var(i.Signal, "required"); err != nil {
 		errors = errors.Append("Signal", err)
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type JobStatus struct {
+	LastError   *string    `json:"last_error,omitzero"`
+	LastRun     *time.Time `json:"last_run,omitempty"`
+	Name        string     `json:"name" validate:"required"`
+	NextRun     *time.Time `json:"next_run,omitempty"`
+	Pending     *bool      `json:"pending,omitempty"`
+	Queued      *bool      `json:"queued,omitempty"`
+	QueuedSince *time.Time `json:"queued_since,omitempty"`
+	Running     bool       `json:"running"`
+	Schedule    *string    `json:"schedule" validate:"required"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+}
+
+func (j JobStatus) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(j.Name, "required"); err != nil {
+		errors = errors.Append("Name", err)
+	}
+	if err := typesValidator.Var(j.Schedule, "required"); err != nil {
+		errors = errors.Append("Schedule", err)
 	}
 	if len(errors) == 0 {
 		return nil
@@ -13418,6 +13449,7 @@ func (s SavedViewsResponse) Validate() error {
 
 type SchedulerStatusResponse struct {
 	Accounts []AccountStatus `json:"accounts" validate:"required"`
+	Jobs     []JobStatus     `json:"jobs" validate:"required"`
 	Running  bool            `json:"running"`
 }
 
@@ -13427,6 +13459,13 @@ func (s SchedulerStatusResponse) Validate() error {
 		if v, ok := any(item).(runtime.Validator); ok {
 			if err := v.Validate(); err != nil {
 				errors = errors.Append(fmt.Sprintf("Accounts[%d]", i), err)
+			}
+		}
+	}
+	for i, item := range s.Jobs {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("Jobs[%d]", i), err)
 			}
 		}
 	}

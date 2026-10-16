@@ -3,6 +3,7 @@ package jobctx
 import (
 	"context"
 	"sync/atomic"
+	"time"
 )
 
 type preemptionKey struct{}
@@ -20,5 +21,18 @@ func WithPreemption(ctx context.Context) (context.Context, func()) {
 // under ctx to yield to queued work.
 func PreemptionRequested(ctx context.Context) bool {
 	flag, ok := ctx.Value(preemptionKey{}).(*atomic.Bool)
-	return ok && flag.Load()
+	return (ok && flag.Load()) || WorkWindowExpired(ctx)
+}
+
+type workDeadlineKey struct{}
+
+// WithWorkWindow bounds admission of new work without canceling admitted work.
+func WithWorkWindow(ctx context.Context, window time.Duration) context.Context {
+	return context.WithValue(ctx, workDeadlineKey{}, time.Now().Add(window))
+}
+
+// WorkWindowExpired reports whether new work must wait for the next pass.
+func WorkWindowExpired(ctx context.Context) bool {
+	deadline, ok := ctx.Value(workDeadlineKey{}).(time.Time)
+	return ok && !time.Now().Before(deadline)
 }

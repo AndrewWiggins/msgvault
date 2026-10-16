@@ -339,7 +339,7 @@ func TestVoyageLiveContract(t *testing.T) {
 	documents, err := client.EmbedDocuments(t.Context(), []embed.DocumentInput{
 		{Chunks: []string{"Synthetic contract document A, chunk 1.", "Synthetic contract document A, chunk 2."}},
 		{Chunks: []string{"Synthetic contract document B, chunk 1."}},
-	})
+	}, nil)
 	require.NoError(err)
 	require.Len(documents, 2)
 	assert.Len(documents[0], 2)
@@ -354,7 +354,7 @@ func TestVoyageLiveContract(t *testing.T) {
 
 	_, err = client.EmbedDocuments(t.Context(), []embed.DocumentInput{{
 		Chunks: []string{strings.Repeat("🧬", 24_000)},
-	}})
+	}}, nil)
 	overContextClass := classifyLiveContractError(err)
 	observer.evidence.Cases["over_32k_context"] = overContextClass
 	assert.Equal("document_too_large", overContextClass)
@@ -468,7 +468,7 @@ func TestVoyageClient_EmbedDocumentsUsesNestedDocumentInput(t *testing.T) {
 	got, err := client.EmbedDocuments(context.Background(), []embed.DocumentInput{
 		{Chunks: []string{"first", "second"}},
 		{Chunks: []string{"third"}},
-	})
+	}, nil)
 
 	require.NoError(t, err)
 	assert.Equal("/v1/contextualizedembeddings", captured.Path)
@@ -521,7 +521,7 @@ func TestVoyageClient_LaterPackedRequestReturnsSuccessfulPrefix(t *testing.T) {
 	}).EmbedDocuments(t.Context(), []embed.DocumentInput{
 		{Chunks: []string{"first document"}},
 		{Chunks: []string{"second document"}},
-	})
+	}, nil)
 
 	require.Error(t, err)
 	handlerMu.Lock()
@@ -554,7 +554,7 @@ func TestVoyageClientBeforeRequestFencesLaterPackedRequest(t *testing.T) {
 	}).EmbedDocuments(t.Context(), []embed.DocumentInput{
 		{Chunks: []string{"first curated person"}},
 		{Chunks: []string{"second curated person"}},
-	})
+	}, nil)
 
 	require.ErrorIs(t, err, vector.ErrSemanticPersonEmbeddingConsentRequired)
 	assert.Equal(t, int32(1), requests.Load(),
@@ -576,7 +576,7 @@ func TestVoyageClientBeforeRequestRejectsProviderRedirects(t *testing.T) {
 			name:    "documents",
 			wantErr: "embedding provider redirects are not allowed",
 			run: func(ctx context.Context, client *embed.VoyageClient) error {
-				_, err := client.EmbedDocuments(ctx, []embed.DocumentInput{{Chunks: []string{"curated person"}}})
+				_, err := client.EmbedDocuments(ctx, []embed.DocumentInput{{Chunks: []string{"curated person"}}}, nil)
 				return err
 			},
 		},
@@ -734,7 +734,7 @@ func TestVoyageClient_AppliesEmbeddingPrefixesByRole(t *testing.T) {
 
 	_, err := client.EmbedDocuments(t.Context(), []embed.DocumentInput{
 		{Chunks: []string{"first chunk", "second chunk"}},
-	})
+	}, nil)
 	must.NoError(err)
 	_, err = client.EmbedQuery(t.Context(), "find this")
 	must.NoError(err)
@@ -758,7 +758,7 @@ func TestVoyageClient_RejectsDuplicateOuterIndex(t *testing.T) {
 	_, err := newVoyageClient(server.URL).EmbedDocuments(context.Background(), []embed.DocumentInput{
 		{Chunks: []string{"first"}},
 		{Chunks: []string{"second"}},
-	})
+	}, nil)
 
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "duplicate outer index 0")
@@ -778,7 +778,7 @@ func TestVoyageClient_RejectsDuplicateInnerIndex(t *testing.T) {
 
 	_, err := newVoyageClient(server.URL).EmbedDocuments(context.Background(), []embed.DocumentInput{
 		{Chunks: []string{"first", "second"}},
-	})
+	}, nil)
 
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "duplicate inner index 0")
@@ -822,7 +822,7 @@ func TestVoyageClient_RejectsMalformedIndexedResponse(t *testing.T) {
 
 			_, err := newVoyageClient(server.URL).EmbedDocuments(context.Background(), []embed.DocumentInput{
 				{Chunks: []string{"first"}},
-			})
+			}, nil)
 
 			require.Error(t, err)
 			assert.ErrorContains(t, err, tt.wantErr)
@@ -858,7 +858,7 @@ func TestVoyageClient_Size400ReturnsBatchToWorker(t *testing.T) {
 		{Chunks: []string{"c1"}},
 	}
 
-	_, err := newVoyageClient(server.URL).EmbedDocuments(context.Background(), documents)
+	_, err := newVoyageClient(server.URL).EmbedDocuments(context.Background(), documents, nil)
 
 	require.ErrorIs(err, embed.ErrDocumentTooLarge)
 	assert.Equal([][][]string{
@@ -878,7 +878,7 @@ func TestVoyageClient_OneDocumentSize400ReturnsDocumentTooLarge(t *testing.T) {
 
 	_, err := newVoyageClient(server.URL).EmbedDocuments(context.Background(), []embed.DocumentInput{
 		{Chunks: []string{"a1", "a2"}},
-	})
+	}, nil)
 
 	require.ErrorIs(t, err, embed.ErrDocumentTooLarge)
 	assert.Equal(t, int32(1), attempts.Load())
@@ -894,7 +894,7 @@ func TestVoyageClient_LiveContextSizeShapeReturnsDocumentTooLarge(t *testing.T) 
 
 	_, err := newVoyageClient(server.URL).EmbedDocuments(t.Context(), []embed.DocumentInput{
 		{Chunks: []string{"synthetic oversized chunk"}},
-	})
+	}, nil)
 
 	assert.ErrorIs(t, err, embed.ErrDocumentTooLarge)
 }
@@ -909,7 +909,7 @@ func TestVoyageClient_StructuralNounsWithoutExcessRemainPermanent(t *testing.T) 
 
 	_, err := newVoyageClient(server.URL).EmbedDocuments(t.Context(), []embed.DocumentInput{
 		{Chunks: []string{"synthetic parameter-error chunk"}},
-	})
+	}, nil)
 
 	require.ErrorIs(t, err, embed.ErrPermanent4xx)
 	assert.NotErrorIs(t, err, embed.ErrDocumentTooLarge)

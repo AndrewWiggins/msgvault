@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
@@ -130,6 +131,9 @@ func (w *PersonWorker) runOnce(
 	}
 	var runErr error
 	for start := 0; start < len(changed); start += w.deps.BatchSize {
+		if jobctx.PreemptionRequested(ctx) {
+			return result, runErr
+		}
 		end := min(start+w.deps.BatchSize, len(changed))
 		batch := changed[start:end]
 		result.Claimed += len(batch)
@@ -150,6 +154,9 @@ func (w *PersonWorker) runOnce(
 		}
 		if len(batchState.rejected) > 0 {
 			if !batchState.endpointHealthy {
+				if jobctx.PreemptionRequested(ctx) {
+					return result, runErr
+				}
 				probeErr := w.probePersonEndpoint(ctx)
 				if vector.SemanticPersonEmbeddingInactive(probeErr) {
 					return result, nil
@@ -200,7 +207,7 @@ func (w *PersonWorker) probePersonEndpoint(ctx context.Context) error {
 	}
 	vectors, err := w.deps.Client.EmbedDocuments(ctx, []DocumentInput{{Chunks: []string{
 		personEndpointProbeText,
-	}}})
+	}}}, nil)
 	if err != nil {
 		return err
 	}
@@ -226,11 +233,34 @@ func (w *PersonWorker) embedPersonBatch(
 			capPersonProviderInput(document.Text, w.deps.MaxInputChars),
 		}}
 	}
-	vectors, embedErr := w.deps.Client.EmbedDocuments(ctx, inputs)
+	completed := 0
+	var checkpointErr error
+	vectors, embedErr := w.deps.Client.EmbedDocuments(ctx, inputs, func(prefix [][][]float32) error {
+		if completed+len(prefix) > len(batch) {
+			checkpointErr = errors.New("person checkpoint exceeds batch")
+		} else {
+			checkpointErr = w.publishPersonPrefix(ctx, gen, batch[completed:completed+len(prefix)], prefix, result, state)
+		}
+		if checkpointErr == nil {
+			completed += len(prefix)
+		}
+		return checkpointErr
+	})
+	if checkpointErr != nil {
+		return checkpointErr
+	}
+	if len(vectors) > len(batch) || (embedErr == nil && len(vectors) != len(batch)) || completed != len(vectors) {
+		result.Failed += len(batch) - completed
+		return fmt.Errorf("embed person documents: returned %d results for %d inputs", len(vectors), len(batch))
+	}
+	batch = batch[completed:]
 	permanent := errors.Is(embedErr, ErrPermanent4xx) || errors.Is(embedErr, ErrDocumentTooLarge)
 	if permanent && len(batch) > 1 {
 		var batchErr error
 		for i := range batch {
+			if jobctx.PreemptionRequested(ctx) {
+				return batchErr
+			}
 			if err := w.embedPersonBatch(ctx, gen, batch[i:i+1], result, state); err != nil {
 				if errors.Is(err, vector.ErrGenerationRetired) {
 					return vector.ErrGenerationRetired
@@ -240,7 +270,7 @@ func (w *PersonWorker) embedPersonBatch(
 		}
 		return batchErr
 	}
-	if permanent && len(batch) == 1 && len(vectors) == 0 {
+	if permanent && len(batch) == 1 {
 		result.Failed++
 		if errors.Is(embedErr, ErrDocumentTooLarge) {
 			return w.recordRejectedPersons(ctx, gen, batch)
@@ -249,10 +279,18 @@ func (w *PersonWorker) embedPersonBatch(
 		state.rejectionErr = errors.Join(state.rejectionErr, embedErr)
 		return nil
 	}
-	if len(vectors) > len(batch) || (embedErr == nil && len(vectors) != len(batch)) {
+
+	if embedErr != nil {
+		if errors.Is(embedErr, jobctx.ErrRunBudgetExceeded) {
+			return embedErr
+		}
 		result.Failed += len(batch)
-		return fmt.Errorf("embed person documents: returned %d results for %d inputs", len(vectors), len(batch))
+		return fmt.Errorf("embed person documents: %w", embedErr)
 	}
+	return nil
+}
+
+func (w *PersonWorker) publishPersonPrefix(ctx context.Context, gen vector.GenerationID, batch []store.PersonSemanticDocument, vectors [][][]float32, result *RunResult, state *personBatchState) error {
 	if len(vectors) > 0 {
 		state.endpointHealthy = true
 	}
@@ -284,12 +322,11 @@ func (w *PersonWorker) embedPersonBatch(
 		result.Failed += len(batch)
 		return fmt.Errorf("upsert person vectors for generation %d: %w", gen, err)
 	}
+	if len(publications) > 0 {
+		jobctx.RecordProgress(ctx)
+	}
 	result.Succeeded += len(publications)
 	result.Failed += len(vectors) - len(publications)
-	if embedErr != nil {
-		result.Failed += len(batch) - len(vectors)
-		return fmt.Errorf("embed person documents: %w", embedErr)
-	}
 	return nil
 }
 
@@ -318,6 +355,9 @@ func (w *PersonWorker) recordRejectedPersons(
 		return vector.ErrGenerationRetired
 	} else if err != nil {
 		return fmt.Errorf("record rejected person revisions for generation %d: %w", gen, err)
+	}
+	if len(publications) > 0 {
+		jobctx.RecordProgress(ctx)
 	}
 	return nil
 }
@@ -401,6 +441,9 @@ func (w *GenerationWorker) RunOnce(
 		return RunResult{}, fmt.Errorf("message embedding pass scope: %w", err)
 	}
 	messageResult, messageErr := w.messages.RunOnce(ctx, gen, messageScope)
+	if jobctx.PreemptionRequested(ctx) {
+		return messageResult, newGenerationRunError(messageErr, nil)
+	}
 	var personResult RunResult
 	var personErr error
 	if w.personScanned == nil {
@@ -461,6 +504,9 @@ func (w *GenerationWorker) RunBackstop(
 		return RunResult{}, fmt.Errorf("person embedding backstop scope: %w", err)
 	}
 	messageResult, messageErr := w.messages.RunBackstop(ctx, gen, messageScope)
+	if jobctx.PreemptionRequested(ctx) {
+		return messageResult, newGenerationRunError(messageErr, nil)
+	}
 	personResult, personErr := w.persons.RunOnce(ctx, gen, personScope)
 	return mergeGenerationResults(messageResult, personResult), newGenerationRunError(messageErr, personErr)
 }

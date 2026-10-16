@@ -16,7 +16,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	docbankdocument "go.kenn.io/docbank/document"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil/storetest"
@@ -335,7 +337,7 @@ func TestDocumentVectorResumeRunsBoundedCleanupForRetiredGeneration(t *testing.T
 			return runDocumentVectorWithFeatures(ctx, st, &vectorFeatures{
 				DocumentBackend: backend,
 				Cfg:             cfg.Vector,
-			}, generationID, limit, testOperationPassScope("document-vector:retired-cleanup"))
+			}, generationID, limit, testOperationPassScope("document-vector:retired-cleanup"), nextDocumentVectorWorkerOwner())
 		},
 	}
 	command := newDocumentsCmd(deps)
@@ -445,13 +447,66 @@ type fakeDocumentVectorCheckpoint struct {
 
 type fakeDocumentVectorCheckpointer struct {
 	calls []fakeDocumentVectorCheckpoint
+	err   error
 }
 
 func (c *fakeDocumentVectorCheckpointer) CheckpointDocumentVectorBuildForFingerprint(_ context.Context, _ int64, fingerprint string, afterChunkID int64, exhausted bool, delta store.DocumentVectorUsageDelta, _ time.Time) error {
 	c.calls = append(c.calls, fakeDocumentVectorCheckpoint{
 		fingerprint: fingerprint, afterChunkID: afterChunkID, exhausted: exhausted, delta: delta,
 	})
-	return nil
+	return c.err
+}
+
+func TestDocumentVectorWorkerRecordsProgressOnlyForAdvancedCheckpoint(t *testing.T) {
+	checkpointErr := errors.New("checkpoint write failed")
+	for _, test := range []struct {
+		name          string
+		result        vectordocument.RunResult
+		checkpointErr error
+		wantProgress  bool
+	}{
+		{
+			name:         "cursor advanced without publications",
+			result:       vectordocument.RunResult{AfterGenerationID: 7, AfterChunkID: 25},
+			wantProgress: true,
+		},
+		{
+			name:         "scan exhausted from a saved cursor",
+			result:       vectordocument.RunResult{Exhausted: true},
+			wantProgress: true,
+		},
+		{
+			name:   "cursor unchanged",
+			result: vectordocument.RunResult{AfterGenerationID: 7, AfterChunkID: 10},
+		},
+		{
+			name:          "checkpoint failed",
+			result:        vectordocument.RunResult{AfterGenerationID: 7, AfterChunkID: 25},
+			checkpointErr: checkpointErr,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := storetest.New(t)
+			worker := checkpointingDocumentVectorWorker{
+				worker:       fakeDocumentVectorWorkerRunner{result: test.result},
+				checkpointer: &fakeDocumentVectorCheckpointer{err: test.checkpointErr},
+				recorder:     fixture.Store,
+				scope:        testOperationPassScope("document-vector:progress"),
+				fingerprint:  strings.Repeat("a", 64),
+				startChunkID: 10,
+				now:          func() time.Time { return time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC) },
+			}
+			ctx := jobctx.WithProgress(t.Context())
+
+			_, err := worker.Run(ctx, 7, 10)
+			if test.checkpointErr != nil {
+				require.ErrorIs(t, err, test.checkpointErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, test.wantProgress, jobctx.HasProgress(ctx))
+		})
+	}
 }
 
 func TestScheduledDocumentVectorRotationRetiresObsoleteBuildingBeforeDesiredBuild(t *testing.T) {
@@ -489,7 +544,7 @@ func TestScheduledDocumentVectorRotationRetiresObsoleteBuildingBeforeDesiredBuil
 		DocumentBackend: backend, SemanticClient: client, Cfg: cfg.Vector,
 	}
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2, "scheduled-worker"))
 	stillActive, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
 	require.NoError(err)
 	require.NotNil(stillActive)
@@ -500,7 +555,7 @@ func TestScheduledDocumentVectorRotationRetiresObsoleteBuildingBeforeDesiredBuil
 	require.Len(backend.deletes, 1)
 	assert.Len(backend.deletes[0], 2)
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2, "scheduled-worker"))
 	_, err = fixture.Store.GetDocumentVectorGeneration(testCtx, obsolete.ID)
 	require.ErrorContains(err, "not found")
 	require.Len(backend.deletes, 2)
@@ -509,7 +564,7 @@ func TestScheduledDocumentVectorRotationRetiresObsoleteBuildingBeforeDesiredBuil
 	require.NoError(err)
 	assert.Equal(active.ID, stillActive.ID)
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2, "scheduled-worker"))
 	newActive, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
 	require.NoError(err)
 	require.NotNil(newActive)
@@ -559,12 +614,12 @@ func TestScheduledDocumentVectorCleansRetiredWithoutConsentOrProvider(t *testing
 	backend := &commandDocumentVectorBackend{}
 	vf := &vectorFeatures{DocumentBackend: backend, Cfg: cfg.Vector}
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, "scheduled-worker"))
 
 	assert.Equal([][]string{{token}}, backend.deletes)
 	_, err = fixture.Store.GetDocumentVectorGeneration(testCtx, generation.ID)
 	require.ErrorContains(err, "not found")
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, "scheduled-worker"))
 }
 
 func TestScheduledDocumentVectorObservesConsentRecordedAfterRuntimeInitialization(t *testing.T) {
@@ -578,7 +633,7 @@ func TestScheduledDocumentVectorObservesConsentRecordedAfterRuntimeInitializatio
 		Cfg:             cfg.Vector,
 	}
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, "scheduled-worker"))
 	active, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
 	require.NoError(err)
 	assert.Nil(active)
@@ -588,7 +643,7 @@ func TestScheduledDocumentVectorObservesConsentRecordedAfterRuntimeInitializatio
 	_, _, err = fixture.Store.RecordDocumentVectorConsent(testCtx, consentSpec, time.Now())
 	require.NoError(err)
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, "scheduled-worker"))
 	active, err = fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
 	require.NoError(err)
 	require.NotNil(active)
@@ -628,7 +683,7 @@ func TestScheduledDocumentVectorCleansObsoleteActiveTokensAfterCoverageIsComplet
 	vf := &vectorFeatures{
 		DocumentBackend: backend, SemanticClient: client, Cfg: cfg.Vector,
 	}
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, "scheduled-worker"))
 	require.Equal([][]string{{token}}, backend.deletes)
 	assert.Zero(client.documentCalls)
 	status, err = fixture.Store.GetDocumentVectorGenerationStatus(testCtx, active.ID, "", 10)
@@ -639,7 +694,7 @@ func TestScheduledDocumentVectorCleansObsoleteActiveTokensAfterCoverageIsComplet
 		`SELECT COUNT(*) FROM document_vector_publications WHERE generation_id = ?`), active.ID).Scan(&publications))
 	assert.Zero(publications)
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, "scheduled-worker"))
 	assert.Len(backend.deletes, 1, "a converged replay does not re-delete finalized tokens")
 	assert.Zero(client.documentCalls)
 }
@@ -650,7 +705,13 @@ func (*commandDocumentSemanticClient) EmbedQuery(context.Context, string) ([]flo
 	return []float32{1, 0, 0}, nil
 }
 
-func (c *commandDocumentSemanticClient) EmbedDocuments(context.Context, []vector.DocumentInput) ([][][]float32, error) {
+func (c *commandDocumentSemanticClient) EmbedDocuments(_ context.Context, _ []vector.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	c.documentCalls++
 	return nil, nil
 }
@@ -740,4 +801,89 @@ func TestDocumentVectorConfirmationPrecedesStore(t *testing.T) {
 	require.NoError(retire.ExecuteContext(testCtx))
 	assert.Equal(fmt.Sprintf("retired=true generation_id=%d; backend cleanup will resume when vector operations next run\n", generation.ID), output.String())
 	assert.Equal(1, openCalls)
+}
+
+func TestScheduledDocumentVectorResumesInterruptedClaim(t *testing.T) {
+	for _, mode := range []string{"interrupted claim", "yield before claim"} {
+		t.Run(mode, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			fixture, spec, testCtx := documentVectorCommandFixture(t)
+			seedScheduledDocumentVectorChunk(t, fixture, spec)
+			invocationFromContext(testCtx).cfg.Vector.Embed.Schedule.RunAfterSync = true
+			consent, err := configuredDocumentVectorConsentSpec(spec, invocationFromContext(testCtx), "document_embedding")
+			require.NoError(err)
+			_, _, err = fixture.Store.RecordDocumentVectorConsent(testCtx, consent, time.Now())
+			require.NoError(err)
+			ctx, cancel := context.WithCancel(testCtx)
+			defer cancel()
+			client := &resumingDocumentSemanticClient{cancel: cancel}
+			capture := &registeredDocumentVectorJobCapture{}
+			require.NoError(registerDocumentVectorJob(capture, &vectorFeatures{DocumentBackend: &commandDocumentVectorBackend{}, SemanticClient: client, Cfg: invocationFromContext(testCtx).cfg.Vector}, fixture.Store, invocationFromContext(testCtx)))
+			if mode == "yield before claim" {
+				ctx, request := jobctx.WithPreemption(ctx)
+				request()
+				require.NoError(capture.job(ctx), "a cooperative yield before claiming leaves the build cursor alone")
+				assert.Zero(client.calls)
+				return
+			}
+			require.ErrorIs(capture.job(ctx), context.Canceled)
+			require.NoError(capture.job(testCtx))
+			assert.Equal(2, client.calls)
+			active, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
+			require.NoError(err)
+			require.NotNil(active, "the interrupted claim resumes without waiting for lease expiry")
+		})
+	}
+}
+
+type resumingDocumentSemanticClient struct {
+	commandDocumentSemanticClient
+
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (c *resumingDocumentSemanticClient) EmbedDocuments(ctx context.Context, documents []vector.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
+	c.calls++
+	if c.calls == 1 {
+		c.cancel()
+		return nil, ctx.Err()
+	}
+	out := make([][][]float32, len(documents))
+	for i, doc := range documents {
+		out[i] = make([][]float32, len(doc.Chunks))
+		for j := range doc.Chunks {
+			out[i][j] = []float32{1, 0, 0}
+		}
+	}
+	return out, nil
+}
+
+func seedScheduledDocumentVectorChunk(t *testing.T, f *storetest.Fixture, spec store.DocumentVectorGenerationSpec) {
+	t.Helper()
+	profile := store.DocumentExtractionProfile{ID: spec.TargetExtractionProfileID, Fingerprint: strings.Repeat("7", 64), RetentionPosture: "standard", TrainingPosture: "opted-out", Model: "extract-test"}
+	require.NoError(t, f.Store.RecordDocumentProviderConsent(t.Context(), store.DocumentProviderConsent{ProfileID: profile.ID, ProfileFingerprint: profile.Fingerprint, RetentionPosture: profile.RetentionPosture, TrainingPosture: profile.TrainingPosture}))
+	messageID := f.CreateMessage("scheduled-document")
+	hash := strings.Repeat("b", 64)
+	require.NoError(t, f.Store.UpsertAttachmentRecord(t.Context(), messageID, store.AttachmentWrite{Filename: "synthetic.pdf", MIMEType: "application/pdf", Size: 128, StoragePath: hash[:2] + "/" + hash, ContentHash: hash, Role: store.AttachmentRoleStandalone, RoleSource: store.AttachmentRoleSourceMIMEDisposition, SourcePartKey: "mime:1.2"}))
+	var attachmentID int64
+	require.NoError(t, f.Store.DB().QueryRow(f.Store.Rebind(`SELECT id FROM attachments WHERE message_id = ?`), messageID).Scan(&attachmentID))
+	_, eligible, err := f.Store.ReconcileDocumentOccurrence(t.Context(), attachmentID, 1)
+	require.NoError(t, err)
+	require.True(t, eligible)
+	claim, err := f.Store.ClaimDocumentExtraction(t.Context(), store.DocumentExtractionClaimInput{ExtractionID: "scheduled-extraction", ProfileID: profile.ID, CanonicalBlobHash: hash, ExtractionInputKey: "original", OccurrenceAttachmentID: attachmentID, OccurrenceMIMEType: "application/pdf", OccurrenceMessageType: "email", LeaseOwner: "extraction-worker", LeaseUntil: time.Now().Add(time.Minute), LocalBytes: 128, SourceSequence: 1})
+	require.NoError(t, err)
+	policy, err := docbankdocument.NewNormalizePolicy(1000)
+	require.NoError(t, err)
+	normalized, err := docbankdocument.NormalizeDocument(docbankdocument.SourceDocument{Family: "pdf", UnitKind: "page", Units: []docbankdocument.SourceUnit{{Index: 0, Markdown: "synthetic document evidence"}}}, policy)
+	require.NoError(t, err)
+	unit, chunk := normalized.Units[0], normalized.Chunks[0]
+	require.NoError(t, f.Store.PublishDocumentExtraction(t.Context(), store.DocumentExtractionPublication{ExtractionID: claim.ExtractionID, ProfileID: claim.ProfileID, CanonicalBlobHash: claim.CanonicalBlobHash, ExtractionInputKey: claim.ExtractionInputKey, OccurrenceAttachmentID: claim.OccurrenceAttachmentID, OccurrenceMIMEType: claim.OccurrenceMIMEType, OccurrenceMessageType: claim.OccurrenceMessageType, LeaseOwner: claim.LeaseOwner, LeaseFence: claim.LeaseFence, ReturnedModel: profile.Model, UnitsProcessed: 1, RequestCount: 1, ManifestChecksum: normalized.Checksum, NormalizationVersion: normalized.PolicyVersion, DocumentFamily: normalized.Family, UnitKind: normalized.UnitKind, Units: []store.DocumentPublishedUnit{{Index: unit.Index, Kind: unit.Kind, Text: unit.Text, Checksum: unit.Checksum, CharCount: unit.CharCount}}, Chunks: []store.DocumentPublishedChunk{{Key: chunk.Key, Ordinal: chunk.Ordinal, Text: chunk.Text, FirstUnitIndex: 0, LastUnitIndex: 0, Checksum: chunk.Checksum, CharCount: chunk.CharCount, Spans: []store.DocumentPublishedSpan{{UnitIndex: chunk.Spans[0].UnitIndex, CharStart: chunk.Spans[0].CharStart, CharEnd: chunk.Spans[0].CharEnd}}}}}))
 }

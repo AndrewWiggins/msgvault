@@ -53,6 +53,15 @@ func TestBackend_PruneOrphanEmbeddingsRemovesOnlyHardDeletedMessages(t *testing.
 	}))
 	activeAccelerator := installReadyFlatAccelerator(t, backend, active, 4)
 	buildingAccelerator := installReadyFlatAccelerator(t, backend, building, 5)
+	_, err = backend.db.Exec(`INSERT INTO embedding_chunk_checkpoints
+		(generation_id, message_id, chunk_index, input_hash, vector_json)
+		VALUES (?, 2, 0, 'input', '[1]'), (?, 3, 0, 'input', '[1]')`, building, building)
+	require.NoError(t, err)
+
+	_, err = backend.db.Exec(`INSERT INTO embedding_chunk_checkpoints
+		(generation_id, document_key, scope_key, message_id, chunk_index, input_hash, vector_json)
+		VALUES (?, 'chat:1:v3:2', 'chat:1:2026-08-08', 0, 0, 'document', '{"vectors":[[1,2,3,4,5]]}')`, building)
+	require.NoError(t, err)
 
 	_, err = mainDB.Exec(`
 		UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = 2;
@@ -64,6 +73,9 @@ func TestBackend_PruneOrphanEmbeddingsRemovesOnlyHardDeletedMessages(t *testing.
 	pruned, err := pruner.PruneOrphanEmbeddings(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), pruned, "generation/message pairs pruned")
+	var checkpoints int
+	require.NoError(t, backend.db.QueryRow(`SELECT COUNT(*) FROM embedding_chunk_checkpoints`).Scan(&checkpoints))
+	assert.Equal(t, 2, checkpoints, "keep live contextual staging and resumable work for archived messages")
 
 	var embeddings, vectors4, vectors5 int64
 	require.NoError(t, backend.db.QueryRow(`SELECT COUNT(*) FROM embeddings`).Scan(&embeddings))
@@ -95,4 +107,9 @@ func TestBackend_PruneOrphanEmbeddingsRemovesOnlyHardDeletedMessages(t *testing.
 	pruned, err = pruner.PruneOrphanEmbeddings(t.Context())
 	require.NoError(t, err)
 	assert.Zero(t, pruned, "second prune is idempotent")
+	require.NoError(t, backend.RetireGeneration(t.Context(), building, false))
+	_, err = pruner.PruneOrphanEmbeddings(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, backend.db.QueryRow(`SELECT COUNT(*) FROM embedding_chunk_checkpoints`).Scan(&checkpoints))
+	assert.Zero(t, checkpoints, "retired requests are removed even without orphan embeddings")
 }

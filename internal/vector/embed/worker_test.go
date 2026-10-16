@@ -51,9 +51,46 @@ type yieldingStampStore struct {
 	cancel context.CancelCauseFunc
 }
 
-func (s *yieldingStampStore) SetEmbedGenIfUnchanged(context.Context, []store.EmbedGenStamp, int64) ([]int64, int, error) {
+func (s *yieldingStampStore) SetEmbedGenIfUnchanged(
+	context.Context, []store.EmbedGenStamp, int64,
+) ([]int64, int, error) {
 	s.cancel(jobctx.ErrYieldedToWaiter)
 	return nil, 0, errors.New("stamp operation failed")
+}
+
+type partialCommitStampStore struct {
+	WorkStore
+
+	cancel context.CancelFunc
+}
+
+func (s *partialCommitStampStore) SetEmbedGen(ctx context.Context, ids []int64, target int64) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	committed, err := s.WorkStore.SetEmbedGen(ctx, ids[:1], target)
+	if err != nil {
+		return committed, err
+	}
+	s.cancel()
+	remaining, err := s.WorkStore.SetEmbedGen(ctx, ids[1:], target)
+	return committed + remaining, err
+}
+
+func (s *partialCommitStampStore) SetEmbedGenIfUnchanged(
+	ctx context.Context, items []store.EmbedGenStamp, target int64,
+) (missed []int64, committed int, err error) {
+	if len(items) == 0 {
+		return nil, 0, nil
+	}
+	missed, committed, err = s.WorkStore.SetEmbedGenIfUnchanged(ctx, items[:1], target)
+	if err != nil {
+		return missed, committed, err
+	}
+	s.cancel()
+	remainingMissed, remaining, err := s.WorkStore.SetEmbedGenIfUnchanged(ctx, items[1:], target)
+	missed = append(missed, remainingMissed...)
+	return missed, committed + remaining, err
 }
 
 type captureLogHandler struct {
@@ -108,7 +145,8 @@ func TestWorker_DrainsToZeroEndToEnd(t *testing.T) {
 	f := newWorkerFixture(t, 5)
 
 	w := newTestWorker(f, 2)
-	res, err := w.RunOnce(context.Background(), f.BuildingGen, testEmbeddingPassScope())
+	ctx := t.Context()
+	res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
 	require.NoError(err, "RunOnce")
 
 	assert.Equal(5, res.Succeeded, "Succeeded")
@@ -1067,3 +1105,136 @@ var _ interface {
 	RunBackstop(ctx context.Context, gen vector.GenerationID, scope operations.PassScope) (RunResult, error)
 	ReclaimStale(ctx context.Context) (int, error)
 } = (*Worker)(nil)
+
+type checkpointInterruptClient struct {
+	EmbeddingClient
+
+	cancel context.CancelCauseFunc
+	cause  error
+	calls  int
+}
+
+func (c *checkpointInterruptClient) Embed(ctx context.Context, input []string) ([][]float32, error) {
+	c.calls++
+	if c.calls == 2 {
+		c.cancel(c.cause)
+		return nil, ctx.Err()
+	}
+	return c.EmbeddingClient.Embed(ctx, input)
+}
+
+func TestWorkerCommittedBatchSurvivesPassInterruption(t *testing.T) {
+	for _, cause := range []error{jobctx.ErrYieldedToWaiter, jobctx.ErrRunBudgetExceeded, nil} {
+		name := "cooperative yield"
+		if cause != nil {
+			name = cause.Error()
+		}
+		t.Run(name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			f := newWorkerFixture(t, 5)
+			ctx, cancel := context.WithCancelCause(jobctx.WithProgress(t.Context()))
+			defer cancel(nil)
+			worker := newTestWorker(f, 2)
+			calls := 0
+			if cause == nil {
+				var request context.CancelFunc
+				ctx, request = jobctx.WithPreemption(ctx)
+				f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
+					calls++
+					request()
+					vectors := make([][]float32, len(inputs))
+					for i := range vectors {
+						vectors[i] = []float32{1, 0, 0, 0}
+					}
+					return vectors, nil
+				}
+			} else {
+				worker.deps.Client = &checkpointInterruptClient{EmbeddingClient: f.FakeClient, cancel: cancel, cause: cause}
+			}
+			_, err := worker.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
+			if cause == nil {
+				require.NoError(err)
+				require.NoError(ctx.Err())
+				assert.Equal(1, calls)
+			} else {
+				require.ErrorIs(context.Cause(ctx), cause)
+			}
+			assert.True(jobctx.HasProgress(ctx))
+			assert.Equal(3, countMissing(t, f.MainDB, int64(f.BuildingGen)), "the first batch remains committed")
+			f.FakeClient.OnEmbed = nil
+			result, err := newTestWorker(f, 2).RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+			require.NoError(err)
+			assert.Equal(3, result.Succeeded, "a resumed scan embeds only remaining messages")
+			assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)))
+		})
+	}
+}
+
+func TestWorkerCheckpointRequiresCommittedStamp(t *testing.T) {
+	for _, mode := range []string{"CAS miss", "failed stamp", "success", "unconditional prefix", "CAS prefix", "rolled-back skip"} {
+		t.Run(mode, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			f := newWorkerFixture(t, 2)
+			worker := newTestWorker(f, 2)
+			ctx, cancel := context.WithCancel(jobctx.WithProgress(t.Context()))
+			defer cancel()
+			ids := []int64{1, 2}
+			var tokens map[int64]any
+			var wantErr error
+			wantProgress, wantMissing := false, 2
+			switch mode {
+			case "CAS miss":
+				tokens = map[int64]any{1: -1, 2: -1}
+			case "failed stamp":
+				cancel()
+				wantErr = context.Canceled
+			case "success":
+				wantProgress, wantMissing = true, 0
+			case "unconditional prefix", "CAS prefix":
+				worker.deps.Store = &partialCommitStampStore{WorkStore: f.Store, cancel: cancel}
+				wantErr = context.Canceled
+				wantProgress, wantMissing = true, 1
+				if mode == "CAS prefix" {
+					tokens = make(map[int64]any, len(ids))
+					for _, id := range ids {
+						var token string
+						require.NoError(f.MainDB.QueryRowContext(ctx, `SELECT CAST(last_modified AS TEXT) FROM messages WHERE id = ?`, id).Scan(&token))
+						tokens[id] = token
+					}
+				}
+			case "rolled-back skip":
+				wantErr = errors.New("vector deletion failed")
+				worker.deps.Backend = failingSkipDeleteBackend{Backend: f.Backend, err: wantErr}
+			}
+			var missed []int64
+			var err error
+			if mode == "rolled-back skip" {
+				missed, err = worker.stampSkipped(ctx, f.BuildingGen, ids, nil)
+			} else {
+				missed, err = worker.stampCovered(ctx, f.BuildingGen, ids, tokens)
+			}
+			if wantErr == nil {
+				require.NoError(err)
+			} else {
+				require.ErrorIs(err, wantErr)
+			}
+			if mode == "CAS miss" {
+				assert.Equal(ids, missed)
+			}
+			assert.Equal(wantProgress, jobctx.HasProgress(ctx))
+			assert.Equal(wantMissing, countMissing(t, f.MainDB, int64(f.BuildingGen)))
+		})
+	}
+}
+
+type failingSkipDeleteBackend struct {
+	vector.Backend
+
+	err error
+}
+
+func (b failingSkipDeleteBackend) Delete(context.Context, vector.GenerationID, []int64) error {
+	return b.err
+}

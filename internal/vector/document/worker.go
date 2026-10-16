@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	docbankdocument "go.kenn.io/docbank/document"
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
 )
@@ -247,6 +248,10 @@ func (w *Worker) Run(ctx context.Context, generationID GenerationID, limit int) 
 		return result, fmt.Errorf("document vector worker dimension %d does not match generation dimension %d", w.deps.Dimension, generation.Dimension)
 	}
 	w.bindCursor(generationID)
+	// Yield before reporting a scan cursor so callers keep the durable one.
+	if jobctx.PreemptionRequested(ctx) {
+		return result, nil
+	}
 	result.AfterGenerationID = generationID
 
 	claims, err := w.collectClaims(ctx, generationID, limit, &result)
@@ -292,13 +297,41 @@ func (w *Worker) Run(ctx context.Context, generationID GenerationID, limit int) 
 		}
 	}
 
-	vectors, providerErr := w.deps.Provider.EmbedDocuments(heartbeat.context(), inputs)
+	completed := 0
+	var checkpointErr error
+	vectors, providerErr := w.deps.Provider.EmbedDocuments(heartbeat.context(), inputs, func(batch [][][]float32) error {
+		end := min(completed+len(batch), len(inputs))
+		checkpointErr = w.publishProviderBatch(ctx, generationID, inputs[completed:end], groups[completed:end], batch, nil, heartbeat, &result)
+		completed = end
+		return checkpointErr
+	})
+	runErr = errors.Join(runErr, checkpointErr)
+	if ctx.Err() != nil || heartbeat.err() != nil || errors.Is(providerErr, jobctx.ErrRunBudgetExceeded) {
+		return result, errors.Join(runErr, providerErr, ctx.Err(), heartbeat.err())
+	}
+	if completed > len(vectors) {
+		return result, errors.Join(runErr, fmt.Errorf("%w: checkpointed results missing from provider response", errInvalidProviderShape))
+	}
+	// Classify the unfinished suffix only after retaining every successful
+	// request. Cancellation leaves its claims available after lease expiry.
+	if completed < len(inputs) || providerErr != nil {
+		runErr = errors.Join(runErr, w.publishProviderBatch(ctx, generationID, inputs[completed:], groups[completed:], vectors[completed:], providerErr, heartbeat, &result))
+	}
+	return result, runErr
+}
+
+func (w *Worker) publishProviderBatch(
+	ctx context.Context, generationID GenerationID,
+	inputs []vector.DocumentInput, groups [][]*store.DocumentVectorChunkClaim,
+	vectors [][][]float32, providerErr error, heartbeat *workerClaimHeartbeat, result *RunResult,
+) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return result, ctxErr
+		return errors.Join(providerErr, ctxErr)
 	}
 	if heartbeatErr := heartbeat.err(); heartbeatErr != nil {
-		return result, heartbeatErr
+		return errors.Join(providerErr, heartbeatErr)
 	}
+	var runErr error
 	outcomes, responseErr := validateWorkerProviderDocuments(inputs, vectors, providerErr, w.deps.Dimension)
 	var embeddings []Embedding
 	var completedClaims []*store.DocumentVectorChunkClaim
@@ -312,22 +345,22 @@ func (w *Worker) Run(ctx context.Context, generationID GenerationID, limit int) 
 			completedClaims = append(completedClaims, claim)
 		}
 	}
-	result.Embedded = len(completedClaims)
+	result.Embedded += len(completedClaims)
 	if len(embeddings) > 0 {
 		if err := w.deps.Backend.PutUnpublished(heartbeat.context(), generationID, w.deps.Dimension, embeddings); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return result, ctxErr
+				return errors.Join(providerErr, err, ctxErr)
 			}
 			if heartbeatErr := heartbeat.err(); heartbeatErr != nil {
-				return result, heartbeatErr
+				return errors.Join(providerErr, err, heartbeatErr)
 			}
 			putErr := fmt.Errorf("%w: %w", errBackendPut, err)
-			failureErr := w.failClaims(ctx, generationID, completedClaims, putErr, heartbeat, &result)
+			failureErr := w.failClaims(ctx, generationID, completedClaims, putErr, heartbeat, result)
 			runErr = errors.Join(runErr, fmt.Errorf("put unpublished document vectors: %w", err), failureErr)
 		} else {
 			for _, claim := range completedClaims {
 				if ctxErr := ctx.Err(); ctxErr != nil {
-					return result, errors.Join(runErr, ctxErr)
+					return errors.Join(runErr, ctxErr)
 				}
 				if err := heartbeat.releaseForTransition(claim); err != nil {
 					runErr = errors.Join(runErr, err)
@@ -337,6 +370,7 @@ func (w *Worker) Run(ctx context.Context, generationID GenerationID, limit int) 
 				switch {
 				case err == nil:
 					result.Published++
+					jobctx.RecordProgress(ctx)
 				case errors.Is(err, store.ErrDocumentVectorSourceChanged):
 					result.SourceChanged++
 					if deleteErr := w.deps.Backend.DeleteTokens(heartbeat.context(), generationID, []string{claim.Token}); deleteErr != nil {
@@ -352,12 +386,12 @@ func (w *Worker) Run(ctx context.Context, generationID GenerationID, limit int) 
 		if outcome.err == nil {
 			continue
 		}
-		failureErr := w.failClaims(ctx, generationID, groups[documentIndex], outcome.err, heartbeat, &result)
+		failureErr := w.failClaims(ctx, generationID, groups[documentIndex], outcome.err, heartbeat, result)
 		runErr = errors.Join(runErr, outcome.err, failureErr)
 	}
 	runErr = errors.Join(runErr, responseErr)
 	runErr = errors.Join(runErr, heartbeat.err())
-	return result, runErr
+	return runErr
 }
 
 // finalizeOutcomes derives public pass accounting only from durable chunk

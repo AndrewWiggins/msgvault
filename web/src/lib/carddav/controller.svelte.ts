@@ -29,6 +29,7 @@ interface VisibilityDocument {
 const FIRST_PAGE_LIMIT = 25;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 8000;
+const IDLE_POLL_MS = 10_000;
 export class CardDAVController {
   status = $state<CardDAVStatus>();
   books = $state<CardDAVBook[]>([]);
@@ -372,8 +373,8 @@ export class CardDAVController {
       return false;
     } finally {
       if (schedule && this.currentStatusCommit(context, statusCommit, requestController.signal) && this.shouldPoll()) {
-        this.pollDelay = MIN_POLL_MS;
-        this.schedulePoll(MIN_POLL_MS);
+        this.pollDelay = this.hasWork() ? MIN_POLL_MS : IDLE_POLL_MS;
+        this.schedulePoll(this.pollDelay);
       }
       if (this.current(context) && this.statusReadAbort === requestController) {
         this.statusReadAbort = undefined;
@@ -456,7 +457,19 @@ export class CardDAVController {
     }
   }
   private shouldPoll(): boolean {
-    return !this.disposed && !this.visibilityDocument?.hidden && Boolean(this.status?.active || this.syncPending);
+    return !this.disposed && !this.visibilityDocument?.hidden && Boolean(this.status || this.syncPending);
+  }
+  private hasWork(): boolean {
+    return Boolean(this.status?.active || this.status?.waiting_for_gate || this.status?.scheduler_running || this.syncPending);
+  }
+  private nextPollDelay(advanced: boolean): number {
+    return this.hasWork() ? (advanced ? MIN_POLL_MS : Math.min(MAX_POLL_MS, this.pollDelay * 2)) : IDLE_POLL_MS;
+  }
+  private async reconcileTerminal(available: boolean): Promise<void> {
+    const generation = this.pollGeneration;
+    this.stopPolling(false);
+    await Promise.all([...(available ? [this.loadBooks(true)] : []), this.refreshRuns()]);
+    if (generation === this.pollGeneration) this.schedulePoll(IDLE_POLL_MS);
   }
   private schedulePoll(delay: number): void {
     if (!this.shouldPoll()) return;
@@ -474,7 +487,7 @@ export class CardDAVController {
     this.pollAbort?.abort();
     const requestController = new AbortController();
     this.pollAbort = requestController;
-    const priorActive = Boolean(this.status?.active);
+    const priorWork = Boolean(this.status?.active || this.status?.waiting_for_gate || this.status?.scheduler_running);
     try {
       const { data } = await generatedGetCardDAVStatus(
         this.connection ? { connection: this.connection } : undefined,
@@ -491,7 +504,7 @@ export class CardDAVController {
       this.statusLoading = false;
       if (!data) {
         this.statusError = 'Unable to load CardDAV status.';
-        this.pollDelay = Math.min(MAX_POLL_MS, this.pollDelay * 2);
+        this.pollDelay = this.nextPollDelay(false);
         this.schedulePoll(this.pollDelay);
         return;
       }
@@ -502,13 +515,12 @@ export class CardDAVController {
       this.statusError = null;
       this.pollFingerprint = fingerprint;
       this.recordSuccessfulStatusCommit(statusCommit);
-      if (priorActive && !data.active && !this.syncPending) {
-        this.stopPolling(false);
-        await Promise.all([...(data.available ? [this.loadBooks(true)] : []), this.refreshRuns()]);
+      if (priorWork && !data.active && !data.waiting_for_gate && !data.scheduler_running && !this.syncPending) {
+        await this.reconcileTerminal(data.available);
         return;
       }
       if (this.shouldPoll()) {
-        this.pollDelay = advanced ? MIN_POLL_MS : Math.min(MAX_POLL_MS, this.pollDelay * 2);
+        this.pollDelay = this.nextPollDelay(advanced);
         this.schedulePoll(this.pollDelay);
       }
       if (becameAvailable) await this.loadBooks(false);
@@ -520,7 +532,7 @@ export class CardDAVController {
         return;
       this.statusLoading = false;
       this.statusError = 'Unable to load CardDAV status.';
-      this.pollDelay = Math.min(MAX_POLL_MS, this.pollDelay * 2);
+      this.pollDelay = this.nextPollDelay(false);
       this.schedulePoll(this.pollDelay);
     } finally {
       if (this.pollAbort === requestController) this.pollAbort = undefined;
@@ -579,6 +591,7 @@ function uniqueRuns(runs: CardDAVRun[]): CardDAVRun[] {
 }
 function statusFingerprint(status: CardDAVStatus): string {
   const run = status.active;
-  if (!run) return `idle:${status.latest?.id ?? 0}:${status.latest?.state ?? ''}`;
-  return [run.id, run.state, run.books, run.created, run.updated, run.removed].join(':');
+  const queue = `${status.waiting_for_gate ?? false}:${status.queued_since ?? ''}:${status.scheduler_running ?? false}`;
+  if (!run) return `idle:${status.latest?.id ?? 0}:${status.latest?.state ?? ''}:${queue}`;
+  return [run.id, run.state, run.books, run.created, run.updated, run.removed, queue].join(':');
 }

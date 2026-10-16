@@ -64,7 +64,10 @@ type DocumentInput = vector.DocumentInput
 // preserving document boundaries. EmbedDocuments can return a completed
 // leading document prefix together with an error; callers must retain that
 // prefix and retry only the unfinished suffix.
+// When checkpoint is non-nil, each completed request is delivered before the
+// next request starts. A checkpoint error stops further provider work. Each
+// callback contains whole documents in order, without repeating prior results.
 type SemanticClient interface {
 	EmbedQuery(ctx context.Context, text string) ([]float32, error)
-	EmbedDocuments(ctx context.Context, documents []DocumentInput) ([][][]float32, error)
+	EmbedDocuments(ctx context.Context, documents []DocumentInput, checkpoint func([][][]float32) error) ([][][]float32, error)
 }

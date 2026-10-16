@@ -253,7 +253,7 @@ func TestProviderDiagnosticsCountActual429Attempts(t *testing.T) {
 				inputs := []DocumentInput{{Chunks: []string{"ab", "cd"}}, {Chunks: []string{"efg"}}}
 				client := NewVoyageClient(VoyageConfig{Endpoint: server.URL, Model: "synthetic", Dimension: 1, Limits: RequestLimits{MaxDocuments: 1}, DocumentPrefix: "document: λ "})
 				w := &ContextWorker{deps: ContextWorkerDeps{Client: client}}
-				vectors, err := w.embedDocumentsMeasured(ctx, inputs)
+				vectors, err := w.embedDocumentsMeasured(ctx, inputs, nil)
 				require.Error(err)
 				require.Len(vectors, 1, "the first packed request succeeded")
 			}
@@ -384,7 +384,7 @@ func TestWorkerDiagnosticsCountCommittedCoverage(t *testing.T) {
 			d := newEmbeddingDiagnosticRun(t.Context(), capture, nil, f.gen, 1)
 			d.beginBatch(2, time.Now())
 			ctx := withEmbeddingDiagnostics(t.Context(), d)
-			w := NewWorker(WorkerDeps{Store: f.store, MainDB: f.store.DB(), Backend: f.backend})
+			w := NewWorker(WorkerDeps{Store: f.store, MainDB: f.store.DB(), Backend: f.backend, VectorsDB: f.backend.DB()})
 			switch mode {
 			case "missing skip":
 				_, err = w.stampSkipped(ctx, f.gen, []int64{ids[0], ids[1] + 1000}, tokens)
@@ -485,7 +485,7 @@ func TestContextDiagnosticsSizeRejection(t *testing.T) {
 				inputs = []DocumentInput{{Chunks: []string{strings.Repeat("é", 2048)}}}
 			}
 			d.beginBatch(len(inputs), time.Now())
-			results, err := w.embedDocuments(withEmbeddingDiagnostics(t.Context(), d), inputs)
+			results, err := w.embedDocuments(withEmbeddingDiagnostics(t.Context(), d), inputs, func([]contextualDocumentEmbedding) error { return nil })
 			require.NoError(err, "an oversized document is recovered or left uncovered without failing the pass")
 			require.Len(results, len(inputs))
 			d.finish(nil)

@@ -67,7 +67,7 @@ func NewClient(cfg Config) *Client {
 	if cfg.MaxRetries == 0 {
 		cfg.MaxRetries = 3
 	}
-	return &Client{cfg: cfg, http: newHTTPClient(cfg.Timeout, nil, cfg.RejectRedirects || cfg.BeforeRequest != nil)}
+	return &Client{cfg: cfg, http: newHTTPClient(cfg.Timeout, cfg.RejectRedirects || cfg.BeforeRequest != nil)}
 }
 
 // Embed embeds document chunks in input order. Kit owns transport validation
@@ -82,24 +82,16 @@ func (c *Client) embed(ctx context.Context, role embedconfig.Role, inputs []stri
 	}
 	ctx = withEmbeddingAttemptGroup(ctx)
 	httpClient := *c.http
-	if c.cfg.BeforeRequest != nil {
-		// Consent failure ends this call, including Kit retries. Each concrete
-		// attempt still checks authorization at the transport boundary.
-		var cancel context.CancelCauseFunc
-		ctx, cancel = context.WithCancelCause(ctx)
-		defer cancel(nil)
-		base := httpClient.Transport
-		if base == nil {
-			base = http.DefaultTransport
-		}
-		httpClient.Transport = beforeRequestTransport{base: base, before: func(ctx context.Context) error {
-			err := c.cfg.BeforeRequest(ctx)
-			if err != nil {
-				cancel(err)
-			}
-			return err
-		}}
+	// Admission or consent failure ends this call, including Kit retries. Each concrete
+	// attempt still checks authorization at the transport boundary.
+	var cancel context.CancelCauseFunc
+	ctx, cancel = context.WithCancelCause(ctx)
+	defer cancel(nil)
+	base := httpClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
 	}
+	httpClient.Transport = beforeRequestTransport{base: base, before: c.cfg.BeforeRequest, cancel: cancel}
 	client, err := embedclient.New(embedclient.Options{
 		Model: embedconfig.Model{Name: c.cfg.Model, Dimensions: c.cfg.Dimension,
 			Metric: embedconfig.MetricCosine, Normalization: embedconfig.NormalizationNone},
@@ -164,7 +156,7 @@ func (c *Client) EmbedQuery(ctx context.Context, text string) ([]float32, error)
 
 // EmbedDocuments flattens document chunks for the OpenAI-compatible request,
 // then restores the original document boundaries without changing chunk order.
-func (c *Client) EmbedDocuments(ctx context.Context, documents []DocumentInput) ([][][]float32, error) {
+func (c *Client) EmbedDocuments(ctx context.Context, documents []DocumentInput, checkpoint func([][][]float32) error) ([][][]float32, error) {
 	var inputs []string
 	for _, document := range documents {
 		inputs = append(inputs, document.Chunks...)
@@ -184,6 +176,11 @@ func (c *Client) EmbedDocuments(ctx context.Context, documents []DocumentInput) 
 		next := offset + len(document.Chunks)
 		documentVecs[i] = vecs[offset:next]
 		offset = next
+	}
+	if checkpoint != nil {
+		if err := checkpoint(documentVecs); err != nil {
+			return documentVecs, err
+		}
 	}
 	return documentVecs, nil
 }

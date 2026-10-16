@@ -266,7 +266,13 @@ func (startupDocumentSemanticClient) EmbedQuery(context.Context, string) ([]floa
 	return []float32{1, 0, 0}, nil
 }
 
-func (startupDocumentSemanticClient) EmbedDocuments(context.Context, []vector.DocumentInput) ([][][]float32, error) {
+func (startupDocumentSemanticClient) EmbedDocuments(_ context.Context, _ []vector.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	return nil, nil
 }
 
@@ -323,6 +329,23 @@ func TestRegisterDocumentVectorJobRequiresDocumentEmbeddingsAndBackend(t *testin
 			assert.Zero(t, unregistered.calls)
 		})
 	}
+}
+
+func TestServeVectorRequestTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
+		const requestTimeout = 10 * time.Minute
+		sched, media := newServeSchedulers(nil, testDiscardLogger(), nil, nil, requestTimeout)
+		defer func() { <-serveSchedulers{sched, media}.Stop().Done() }()
+		require.NoError(sched.SetDocumentVectorJob(func(ctx context.Context) error {
+			deadline, bounded := ctx.Deadline()
+			require.True(bounded)
+			assert.Equal(5*time.Minute+requestTimeout+5*time.Second, time.Until(deadline))
+			return nil
+		}, "0 0 1 1 *", false))
+		require.NoError(sched.TriggerJob("document-vector"))
+	})
 }
 
 func TestStartVectorInitInstallsOnlyConsentedDocumentSearch(t *testing.T) {

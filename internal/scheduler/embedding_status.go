@@ -1,65 +1,22 @@
 package scheduler
 
-import (
-	"context"
-	"time"
+import "go.kenn.io/msgvault/internal/vector"
 
-	"go.kenn.io/msgvault/internal/vector"
-)
-
-// EmbeddingStatus is live scheduler evidence, including a post-sync pass that
-// inherits the account sync's slot instead of acquiring a second one.
+// EmbeddingStatus reports the same reserved pass for cron and post-sync work.
 func (s *Scheduler) EmbeddingStatus() vector.EmbeddingStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	status := vector.EmbeddingStatus{Job: vector.EmbeddingJobState{State: "idle"}, Scheduler: vector.EmbeddingSchedulerState{
-		Registered: s.embed.job != nil, Schedule: s.embedSchedule, RunAfterSync: s.embed.runAfterSync,
+		Registered: s.genericFuncs["embed"] != nil, Schedule: s.genericSchedules["embed"], RunAfterSync: s.runEmbedAfterSync,
 	}}
-	if s.embedRunning > 0 {
-		status.Job.State = "running"
-		started := s.embedStartedAt
-		status.Job.StartedAt = &started
-	} else if s.embedQueued > 0 {
+	if s.genericQueued["embed"] {
 		status.Job.State = "queued"
-	}
-	if s.embedQueued > 0 {
-		queued := s.embedQueuedAt
+		queued := s.genericQueuedSince["embed"]
 		status.Job.QueuedAt = &queued
+	} else if s.genericRunning["embed"] {
+		status.Job.State = "running"
+		started := s.genericStartedAt["embed"]
+		status.Job.StartedAt = &started
 	}
 	return status
-}
-
-func (s *Scheduler) runEmbeddingJob(job func(context.Context) error, acquire bool) error {
-	if acquire {
-		s.mu.Lock()
-		if s.embedQueued == 0 {
-			s.embedQueuedAt = time.Now().UTC()
-		}
-		s.embedQueued++
-		s.mu.Unlock()
-		done, ok := s.beginWork("scheduled embedding", true)
-		s.mu.Lock()
-		s.embedQueued--
-		s.mu.Unlock()
-		if !ok {
-			return nil
-		}
-		defer done()
-	}
-	s.mu.Lock()
-	// Overlapping runs report the earliest start, so a later run cannot make
-	// one still in progress look as if it began before the job.
-	if s.embedRunning == 0 {
-		s.embedStartedAt = time.Now().UTC()
-	}
-	s.embedRunning++
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.embedRunning--
-		s.mu.Unlock()
-	}()
-	ctx, end := s.jobContext("embed", false, 0)
-	defer end()
-	return job(ctx)
 }

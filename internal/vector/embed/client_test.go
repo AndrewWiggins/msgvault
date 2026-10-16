@@ -95,7 +95,7 @@ func TestClient_EmbedDocumentsFlattensWithoutChangingOrder(t *testing.T) {
 	client, calls := newRecordingOpenAIClient(t)
 	docs := []DocumentInput{{Chunks: []string{"a", "b"}}, {Chunks: []string{"c"}}}
 
-	got, err := client.EmbedDocuments(context.Background(), docs)
+	got, err := client.EmbedDocuments(context.Background(), docs, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, [][]string{{"a", "b", "c"}}, *calls)
@@ -135,7 +135,7 @@ func TestClient_AppliesEmbeddingPrefixesByRole(t *testing.T) {
 
 	_, err := client.EmbedDocuments(t.Context(), []DocumentInput{
 		{Chunks: []string{"first chunk", "second chunk"}},
-	})
+	}, nil)
 	must.NoError(err)
 	_, err = client.EmbedQuery(t.Context(), "find this")
 	must.NoError(err)
@@ -161,7 +161,7 @@ func TestClientBeforeRequestFencesEveryRetryAttempt(t *testing.T) {
 		{
 			name: "documents",
 			run: func(ctx context.Context, client *Client) error {
-				_, err := client.EmbedDocuments(ctx, []DocumentInput{{Chunks: []string{"curated person"}}})
+				_, err := client.EmbedDocuments(ctx, []DocumentInput{{Chunks: []string{"curated person"}}}, nil)
 				return err
 			},
 		},
@@ -208,7 +208,7 @@ func TestClientBeforeRequestRejectsProviderRedirects(t *testing.T) {
 		{
 			name: "documents",
 			run: func(ctx context.Context, client *Client) error {
-				_, err := client.EmbedDocuments(ctx, []DocumentInput{{Chunks: []string{"curated person"}}})
+				_, err := client.EmbedDocuments(ctx, []DocumentInput{{Chunks: []string{"curated person"}}}, nil)
 				return err
 			},
 		},

@@ -1,0 +1,369 @@
+package scheduler
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/jobctx"
+	"go.kenn.io/msgvault/internal/operations"
+	"go.kenn.io/msgvault/internal/vector"
+	"go.kenn.io/msgvault/internal/vector/embed"
+)
+
+// policyEmbedRunner exercises EmbedJob's real invocation and phase boundaries.
+// The callback models a provider call interrupted after a durable checkpoint.
+type policyEmbedRunner struct {
+	fakeRunner
+
+	run func(context.Context) error
+}
+
+func (r *policyEmbedRunner) RunOnce(ctx context.Context, _ vector.GenerationID, _ operations.PassScope) (embed.RunResult, error) {
+	return embed.RunResult{}, r.run(ctx)
+}
+
+func registerPolicyVectorJob(t *testing.T, s *Scheduler, name string, run func(context.Context) error) {
+	t.Helper()
+	require := require.New(t)
+	if name == "embed" {
+		require.NoError(s.SetEmbedJob(&EmbedJob{
+			Worker: &policyEmbedRunner{run: run}, Backend: &fakeBackend{active: vector.Generation{ID: 42}}, BackstopInterval: -1,
+		}, "0 0 1 1 *", false))
+	} else {
+		require.NoError(s.SetDocumentVectorJob(run, "0 0 1 1 *", false))
+	}
+}
+
+func TestScheduledVectorPassRejectsRetryAfterWorkWindow(t *testing.T) {
+	for _, provider := range []string{"openai", "voyage"} {
+		t.Run(provider, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				assert := assert.New(t)
+				require := require.New(t)
+				const requestTimeout = 10 * time.Minute
+				var attempts atomic.Int32
+				var secondRequestAt atomic.Int64
+				started := time.Now()
+				server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if attempts.Add(1) == 2 {
+						secondRequestAt.Store(int64(time.Since(started)))
+					}
+					w.Header().Set("Retry-After", "360")
+					http.Error(w, "synthetic rate limit", http.StatusTooManyRequests)
+				}))
+				previousTransport := http.DefaultTransport
+				http.DefaultTransport = server.Client().Transport
+				defer func() { http.DefaultTransport = previousTransport }()
+				client := embed.NewClient(embed.Config{
+					Endpoint: server.URL, Model: "synthetic", Dimension: 4, Timeout: requestTimeout, MaxRetries: 2,
+				})
+				run := func(ctx context.Context) error {
+					_, err := client.Embed(ctx, []string{"synthetic input"})
+					return err
+				}
+				if provider == "voyage" {
+					voyage := embed.NewVoyageClient(embed.VoyageConfig{Endpoint: server.URL, Model: "synthetic", Dimension: 4, Timeout: requestTimeout, MaxRetries: 2})
+					run = func(ctx context.Context) error { _, err := voyage.EmbedQuery(ctx, "synthetic input"); return err }
+				}
+				s := New(nil).WithVectorRequestTimeout(requestTimeout)
+				defer func() { <-s.Stop().Done() }()
+				registerPolicyVectorJob(t, s, "embed", run)
+				require.Error(s.TriggerJob("embed"))
+				assert.Equal(int32(1), attempts.Load(), "second provider request started at %s", time.Duration(secondRequestAt.Load()))
+			})
+		})
+	}
+}
+
+func TestVectorPassBudgetRemainsFinite(t *testing.T) {
+	for _, name := range []string{"embed", "document-vector"} {
+		for _, test := range []struct {
+			name                         string
+			timeout, response, admission time.Duration
+		}{
+			{name: "default budget"},
+			{name: "configured budget", timeout: 10 * time.Minute},
+			{name: "slow response", timeout: 10 * time.Minute, response: 6 * time.Minute, admission: 4*time.Minute + 59*time.Second},
+		} {
+			t.Run(name+"/"+test.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					assert := assert.New(t)
+					require := require.New(t)
+					s := New(nil).WithVectorRequestTimeout(test.timeout)
+					defer func() { <-s.Stop().Done() }()
+					registerPolicyVectorJob(t, s, name, func(ctx context.Context) error {
+						if test.response == 0 {
+							<-ctx.Done()
+							return ctx.Err()
+						}
+						time.Sleep(test.admission)
+						requestCtx, cancel := context.WithTimeout(ctx, test.timeout)
+						defer cancel()
+						select {
+						case <-time.After(test.response):
+							jobctx.RecordProgress(ctx)
+							return nil
+						case <-requestCtx.Done():
+							return requestCtx.Err()
+						}
+					})
+					started := time.Now()
+					err := s.TriggerJob(name)
+					if test.response == 0 {
+						require.ErrorIs(err, jobctx.ErrRunBudgetExceeded)
+						timeout := test.timeout
+						if timeout == 0 {
+							timeout = 30 * time.Second
+						}
+						assert.Equal(5*time.Minute+timeout+5*time.Second, time.Since(started))
+					} else {
+						require.NoError(err)
+						assert.Equal(test.admission+test.response, time.Since(started))
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestAutomaticVectorPassYieldsAndResumes(t *testing.T) {
+	for _, name := range []string{"embed", "document-vector"} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				assert := assert.New(t)
+				require := require.New(t)
+				var events []string
+				var started, admitted time.Time
+				syncRuns := 0
+				syncCompleted := false
+				recordWaiter := func(ctx context.Context) error {
+					syncRuns++
+					admitted = time.Now()
+					events = append(events, "sync")
+					select {
+					case <-time.After(3 * time.Minute):
+						syncCompleted = true
+						events = append(events, "complete")
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				s := New(func(ctx context.Context, _ string) error { return recordWaiter(ctx) }).WithVectorRequestTimeout(10 * time.Minute).WithWorkTracker(newSerialWorkTracker())
+				defer func() { <-s.Stop().Done() }()
+				runs := 0
+				registerPolicyVectorJob(t, s, name, func(ctx context.Context) error {
+					runs++
+					if runs == 1 {
+						started = time.Now()
+						events = append(events, "checkpoint")
+						jobctx.RecordProgress(ctx)
+						<-ctx.Done()
+						require.ErrorIs(context.Cause(ctx), ErrYieldedToWaiter)
+						return ctx.Err()
+					}
+					events = append(events, "resume")
+					if !syncCompleted {
+						jobctx.RecordProgress(ctx)
+						<-ctx.Done()
+						return ctx.Err()
+					}
+					return nil
+				})
+				mustStartJob(t, s, name)
+				synctest.Wait()
+				require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", Preemptible: true, Run: recordWaiter}))
+				mustStartJob(t, s, "carddav")
+				synctest.Wait()
+				time.Sleep(preemptAfter + 2*yieldPollInterval + 3*time.Minute)
+				synctest.Wait()
+				assert.Equal([]string{"checkpoint", "sync", "complete", "resume"}, events)
+				assert.Equal(1, syncRuns)
+				assert.LessOrEqual(admitted.Sub(started), preemptAfter+2*yieldPollInterval)
+			})
+		})
+	}
+}
+
+func TestGateQueueAge(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
+		gate := newSerialWorkTracker()
+		release, ok := gate.BeginWork()
+		require.True(ok)
+		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(gate)
+		defer func() { <-s.Stop().Done() }()
+		require.NoError(s.AddAccount("queued@example.test", "0 0 1 1 *"))
+		require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", Run: func(context.Context) error { return nil }}))
+		since := time.Now()
+		require.NoError(s.TriggerSync("queued@example.test"))
+		mustStartJob(t, s, "carddav")
+		synctest.Wait()
+		s.onAccountTick("queued@example.test")
+		s.onJobTick("carddav")
+		time.Sleep(preemptAfter)
+		for range 3 {
+			s.onAccountTick("queued@example.test")
+			s.onJobTick("carddav")
+		}
+		assert.Equal(since, s.Status()[0].QueuedSince)
+		assert.Equal(since, s.JobStatus()[0].QueuedSince)
+		assert.True(s.Status()[0].Queued)
+		assert.True(s.JobStatus()[0].Queued)
+		release()
+		synctest.Wait()
+		assert.True(s.Status()[0].QueuedSince.IsZero())
+		assert.True(s.JobStatus()[0].QueuedSince.IsZero())
+	})
+}
+
+func TestAutomaticEmbeddingReportsWorkerError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
+		workerErr := errors.New("embedding provider unavailable")
+		s := New(nil)
+		defer func() { <-s.Stop().Done() }()
+		registerPolicyVectorJob(t, s, "embed", func(context.Context) error { return workerErr })
+		err := s.TriggerJob("embed")
+		require.ErrorIs(err, workerErr)
+		statuses := s.JobStatus()
+		require.Len(statuses, 1)
+		status := statuses[0]
+		assert.Equal(workerErr.Error(), status.LastError)
+		assert.True(status.LastRun.IsZero())
+	})
+}
+
+func TestReservedGenericJobKeepsPolicyOnReplacement(t *testing.T) {
+	for _, change := range []string{"replaced", "removed"} {
+		t.Run(change, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				assert := assert.New(t)
+				require := require.New(t)
+				s := New(nil)
+				defer func() { <-s.Stop().Done() }()
+				var calls []string
+				require.NoError(s.AddJob(Job{Name: "bounded", Schedule: "0 0 1 1 *", Preemptible: true, MaxRuntime: vectorPassBudget, Run: func(ctx context.Context) error {
+					calls = append(calls, "original")
+					deadline, bounded := ctx.Deadline()
+					assert.True(bounded)
+					assert.Equal(vectorPassBudget, time.Until(deadline))
+					return ErrReschedule
+				}}))
+				run, disposition, err := s.reserveGenericJob("bounded", false)
+				require.NoError(err)
+				require.Equal(JobStarted, disposition)
+				if change == "removed" {
+					s.RemoveJob("bounded")
+				} else {
+					require.NoError(s.AddJob(Job{Name: "bounded", Schedule: "0 0 1 1 *", MaxRuntime: 30 * time.Second, Run: func(ctx context.Context) error {
+						calls = append(calls, "replacement")
+						deadline, bounded := ctx.Deadline()
+						assert.True(bounded)
+						assert.Equal(30*time.Second, time.Until(deadline))
+						return nil
+					}}))
+				}
+
+				require.NoError(s.runJob("bounded", run))
+				synctest.Wait()
+				if change == "removed" {
+					assert.Equal([]string{"original"}, calls)
+					assert.Empty(s.JobStatus())
+				} else {
+					assert.Equal([]string{"original", "replacement"}, calls)
+				}
+			})
+		})
+	}
+}
+
+func TestAutomaticVectorPeersStopWithoutProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		assert := assert.New(t)
+		s := New(nil).WithWorkTracker(newSerialWorkTracker())
+		defer func() { <-s.Stop().Done() }()
+		calls := map[string]int{}
+		for _, name := range []string{"embed", "document-vector"} {
+			registerPolicyVectorJob(t, s, name, func(ctx context.Context) error {
+				calls[name]++
+				<-ctx.Done()
+				return ctx.Err()
+			})
+		}
+		mustStartJob(t, s, "embed")
+		synctest.Wait()
+		mustStartJob(t, s, "document-vector")
+		synctest.Wait()
+		time.Sleep(2 * (vectorPassBudget + 30*time.Second + 5*time.Second))
+		synctest.Wait()
+		for _, status := range s.JobStatus() {
+			assert.Equal(1, calls[status.Name])
+			assert.Contains(status.LastError, "runtime budget exceeded before committing progress")
+			assert.False(status.Pending)
+			assert.False(status.Running)
+		}
+	})
+}
+
+func TestInterruptedPassWithoutProgress(t *testing.T) {
+	for _, interruption := range []string{"cancelled", "manual"} {
+		t.Run(interruption, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				assert := assert.New(t)
+				require := require.New(t)
+				tracker := &yieldingWorkTracker{}
+				var gate WorkTracker = newSerialWorkTracker()
+				if interruption == "manual" {
+					gate = tracker
+				}
+				s := New(nil).WithWorkTracker(gate)
+				defer func() { <-s.Stop().Done() }()
+				workerErr := errors.New("synthetic publication failure")
+				complete := make(chan struct{})
+				calls := 0
+				require.NoError(s.AddJob(Job{Name: "test", Schedule: "0 0 1 1 *", Preemptible: true, MaxRuntime: vectorPassBudget, Run: func(ctx context.Context) error {
+					calls++
+					if calls > 1 {
+						<-complete
+						return nil
+					}
+					<-ctx.Done()
+					return errors.Join(workerErr, ctx.Err())
+				}}))
+				mustStartJob(t, s, "test")
+				synctest.Wait()
+				if interruption == "manual" {
+					tracker.yield.Store(true)
+				} else {
+					require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", Run: func(context.Context) error { return nil }}))
+					mustStartJob(t, s, "carddav")
+					synctest.Wait()
+				}
+				time.Sleep(preemptAfter + 3*yieldPollInterval)
+				synctest.Wait()
+				var status JobStatus
+				for _, candidate := range s.JobStatus() {
+					if candidate.Name == "test" {
+						status = candidate
+					}
+				}
+				assert.Equal(2, calls)
+				assert.Equal(workerErr.Error(), status.LastError)
+				assert.False(status.Pending)
+				close(complete)
+				synctest.Wait()
+			})
+		})
+	}
+}

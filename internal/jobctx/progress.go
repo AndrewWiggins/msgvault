@@ -28,3 +28,8 @@ func HasProgress(ctx context.Context) bool {
 	progress, ok := ctx.Value(progressKey{}).(*atomic.Bool)
 	return ok && progress.Load()
 }
+
+// RunBudgetExpired reports either admission-window or hard runtime expiry.
+func RunBudgetExpired(ctx context.Context) bool {
+	return WorkWindowExpired(ctx) || errors.Is(context.Cause(ctx), ErrRunBudgetExceeded)
+}

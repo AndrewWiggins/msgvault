@@ -373,7 +373,8 @@ import (
 // 3.22.0 adds account aliases, source lifecycle fields, account merging, and
 // owner source-maintenance requests. Existing source identifiers and account
 // requests remain valid.
-const APISchemaVersion = "3.22.0"
+// 3.23.0 adds queue timestamps to scheduler status and gate-wait state to CardDAV status.
+const APISchemaVersion = "3.23.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
@@ -1005,6 +1006,11 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 					"validate": "omitempty",
 				}
 			}
+		}
+	}
+	if job := schemas["JobStatus"]; job != nil {
+		if schedule := job.Properties["schedule"]; schedule != nil {
+			setCodegenGoType(schedule, "*string")
 		}
 	}
 	const emailProperty = "email"

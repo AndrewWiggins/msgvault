@@ -60,7 +60,9 @@ func NewVoyageClient(cfg VoyageConfig) *VoyageClient {
 		cfg.Limits.MaxUTF8Bytes = defaultVoyageRequestLimits.MaxUTF8Bytes
 	}
 	cfg.Limits = capVoyageRequestLimits(cfg.Limits)
-	return &VoyageClient{cfg: cfg, http: newHTTPClient(cfg.Timeout, cfg.BeforeRequest, cfg.RejectRedirects)}
+	client := newHTTPClient(cfg.Timeout, cfg.RejectRedirects || cfg.BeforeRequest != nil)
+	client.Transport = beforeRequestTransport{base: client.Transport, before: cfg.BeforeRequest}
+	return &VoyageClient{cfg: cfg, http: client}
 }
 
 type voyageRequest struct {
@@ -105,7 +107,7 @@ func (c *VoyageClient) EmbedQuery(ctx context.Context, text string) ([]float32, 
 // order. Local packing splits only between documents. A provider size rejection
 // is returned to ContextWorker, which owns partial-success recovery. When a
 // later packed request fails, results contains the successful document prefix.
-func (c *VoyageClient) EmbedDocuments(ctx context.Context, documents []DocumentInput) ([][][]float32, error) {
+func (c *VoyageClient) EmbedDocuments(ctx context.Context, documents []DocumentInput, checkpoint func([][][]float32) error) ([][][]float32, error) {
 	if len(documents) == 0 {
 		return nil, nil
 	}
@@ -124,6 +126,11 @@ func (c *VoyageClient) EmbedDocuments(ctx context.Context, documents []DocumentI
 			addEmbeddingPrefix(ctx, c.cfg.DocumentPrefix, len(document.Chunks))
 		}
 		results = append(results, batchResults...)
+		if checkpoint != nil {
+			if err := checkpoint(batchResults); err != nil {
+				return results, err
+			}
+		}
 	}
 	return results, nil
 }

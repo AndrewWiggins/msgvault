@@ -9,6 +9,7 @@ export interface AccountStatus {
   next_run: string;
   pending?: boolean;
   queued?: boolean;
+  queued_since?: string;
   running: boolean;
   schedule: string;
   started_at?: string;

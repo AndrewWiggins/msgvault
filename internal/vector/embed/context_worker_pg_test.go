@@ -39,7 +39,13 @@ func (c *pgContextPartialSemanticFake) EmbedQuery(context.Context, string) ([]fl
 	return make([]float32, 4), nil
 }
 
-func (c *pgContextPartialSemanticFake) EmbedDocuments(_ context.Context, documents []DocumentInput) ([][][]float32, error) {
+func (c *pgContextPartialSemanticFake) EmbedDocuments(_ context.Context, documents []DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	c.calls = append(c.calls, append([]DocumentInput(nil), documents...))
 	result := func(document DocumentInput) [][]float32 {
 		vectors := make([][]float32, len(document.Chunks))
@@ -58,7 +64,13 @@ func (c *pgContextPartialSemanticFake) EmbedDocuments(_ context.Context, documen
 	return out, nil
 }
 
-func (c *pgContextSemanticFake) EmbedDocuments(_ context.Context, documents []DocumentInput) ([][][]float32, error) {
+func (c *pgContextSemanticFake) EmbedDocuments(_ context.Context, documents []DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
+	defer func() {
+		if checkpoint != nil && len(batchVectors) > 0 {
+			batchErr = errors.Join(batchErr, checkpoint(batchVectors))
+		}
+	}()
+
 	if c.before != nil {
 		c.before()
 	}
@@ -111,7 +123,8 @@ func newPGContextWorkerFixture(t *testing.T, mutate func(*ContextWorkerDeps)) *p
 	require.NoError(t, err)
 	client := &pgContextSemanticFake{dim: 4}
 	deps := ContextWorkerDeps{
-		Backend: backend, Publisher: backend, Store: st, Client: client,
+		Checkpoints: vector.ChunkCheckpointStore{DB: st.DB(), Rebind: st.Rebind},
+		Backend:     backend, Publisher: backend, Store: st, Client: client,
 		Assembler:          CompositeAssembler{Policy: AssemblyPolicy{MaxChunkRunes: 100}, Chat: ChatWindowAssembler{Policy: AssemblyPolicy{MaxChunkRunes: 100, ChatGap: 30 * time.Minute}}},
 		ChangeBatchSize:    1,
 		ReconcileBatchSize: 1,
@@ -244,7 +257,8 @@ func TestContextWorker_PostgreSQLLaterPackedReplacementFailurePreservesUnresolve
 
 	client := &pgContextPartialSemanticFake{}
 	f.worker = NewContextWorker(ContextWorkerDeps{
-		Backend: f.backend, Publisher: f.backend, Store: f.store,
+		Checkpoints: vector.ChunkCheckpointStore{DB: f.store.DB(), Rebind: f.store.Rebind},
+		Backend:     f.backend, Publisher: f.backend, Store: f.store,
 		Assembler: CompositeAssembler{
 			Policy: AssemblyPolicy{MaxChunkRunes: 200, ChatGap: 30 * time.Minute},
 			Chat:   ChatWindowAssembler{Policy: AssemblyPolicy{MaxChunkRunes: 200, ChatGap: 30 * time.Minute}},

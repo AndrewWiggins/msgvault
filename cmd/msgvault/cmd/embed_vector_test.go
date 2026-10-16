@@ -423,7 +423,7 @@ func TestSetupVectorFeaturesDocumentClientRejectsCrossOriginRedirects(t *testing
 			})
 			_, err := vf.SemanticClient.EmbedDocuments(t.Context(), []vector.DocumentInput{{
 				Chunks: []string{"private attachment text"},
-			}})
+			}}, nil)
 
 			require.ErrorIs(t, err, embed.ErrEmbeddingProviderRedirect)
 			_, err = vf.DocumentQueryClient.EmbedQuery(t.Context(), "private query text")
@@ -468,7 +468,7 @@ func TestSetupVectorFeatures_AppliesOpenAIEmbeddingPrefixes(t *testing.T) {
 
 	_, err := vf.SemanticClient.EmbedDocuments(t.Context(), []vector.DocumentInput{
 		{Chunks: []string{"first chunk", "second chunk"}},
-	})
+	}, nil)
 	must.NoError(err)
 	_, err = vf.DocumentQueryClient.EmbedQuery(t.Context(), "document query")
 	must.NoError(err)
@@ -478,7 +478,7 @@ func TestSetupVectorFeatures_AppliesOpenAIEmbeddingPrefixes(t *testing.T) {
 	must.NoError(err)
 	_, err = vf.SemanticClient.EmbedDocuments(t.Context(), []vector.DocumentInput{
 		{Chunks: []string{maxChunk}},
-	})
+	}, nil)
 	must.NoError(err)
 
 	check.Equal([][]string{
@@ -534,7 +534,7 @@ func TestSetupVectorFeatures_AppliesVoyageEmbeddingPrefixes(t *testing.T) {
 
 	_, err := vf.SemanticClient.EmbedDocuments(t.Context(), []vector.DocumentInput{
 		{Chunks: []string{"first chunk", "second chunk"}},
-	})
+	}, nil)
 	must.NoError(err)
 	_, err = vf.DocumentQueryClient.EmbedQuery(t.Context(), "document query")
 	must.NoError(err)
@@ -544,7 +544,7 @@ func TestSetupVectorFeatures_AppliesVoyageEmbeddingPrefixes(t *testing.T) {
 	must.NoError(err)
 	_, err = vf.SemanticClient.EmbedDocuments(t.Context(), []vector.DocumentInput{
 		{Chunks: []string{maxChunk}},
-	})
+	}, nil)
 	must.NoError(err)
 
 	check.Equal([]voyageCall{

@@ -16,7 +16,7 @@ import (
 type operationalTestBackend struct{}
 
 func (operationalTestBackend) ExecuteOperation(context.Context, string, map[string]any) (*OperationResult, error) {
-	return &OperationResult{Output: map[string]any{"running": false, "accounts": []any{}}}, nil
+	return &OperationResult{Output: map[string]any{"running": false, "accounts": []any{}, "jobs": []any{}}}, nil
 }
 func (operationalTestBackend) OperationDisclosure(context.Context, string, map[string]any) (string, error) {
 	return "Sync the selected configured source", nil
@@ -52,7 +52,7 @@ func TestOperationalReadRetainsTypedStructuredOutput(t *testing.T) {
 	assertions := assert.New(t)
 	opts := ServeOptions{Operations: operationalTestBackend{}, OperationCapabilities: []string{"get_source_scheduler_status"}}
 	result := rawCallTool(t, opts, "get_source_scheduler_status", map[string]any{})
-	assertions.Equal(map[string]any{"running": false, "accounts": []any{}}, result["structuredContent"])
+	assertions.Equal(map[string]any{"running": false, "accounts": []any{}, "jobs": []any{}}, result["structuredContent"])
 }
 
 type countingOperationalBackend struct {

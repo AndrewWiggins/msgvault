@@ -2191,7 +2191,8 @@ func TestStore_PersistMessageClearsEmbedGenWhenEmbeddingInputsChange(t *testing.
 	require.NoError(err, "PersistMessage first call")
 
 	const gen = int64(7)
-	require.NoError(f.Store.SetEmbedGen(ctx, []int64{msgID}, gen), "SetEmbedGen")
+	_, stampErr := f.Store.SetEmbedGen(ctx, []int64{msgID}, gen)
+	require.NoError(stampErr, "SetEmbedGen")
 	assert.Equal(sql.NullInt64{Int64: gen, Valid: true}, readEmbedGen(t, f.Store, msgID),
 		"precondition: message is stamped")
 
@@ -2212,7 +2213,8 @@ func TestStore_PersistMessageClearsEmbedGenWhenEmbeddingInputsChange(t *testing.
 	require.NoError(err, "PersistMessage changed body")
 	assert.False(readEmbedGen(t, f.Store, msgID).Valid, "body change must clear embed_gen")
 
-	require.NoError(f.Store.SetEmbedGen(ctx, []int64{msgID}, gen), "SetEmbedGen after body change")
+	_, stampErr = f.Store.SetEmbedGen(ctx, []int64{msgID}, gen)
+	require.NoError(stampErr, "SetEmbedGen after body change")
 	msg.Subject = sql.NullString{String: "Updated subject", Valid: true}
 	_, err = f.Store.PersistMessage(data)
 	require.NoError(err, "PersistMessage changed subject")
@@ -2239,7 +2241,8 @@ func TestStore_PersistMessagePreservesEmbedGenForEquivalentHTMLFallback(t *testi
 	require.NoError(err, "PersistMessage first call")
 
 	const gen = int64(7)
-	require.NoError(f.Store.SetEmbedGen(ctx, []int64{msgID}, gen), "SetEmbedGen")
+	_, stampErr := f.Store.SetEmbedGen(ctx, []int64{msgID}, gen)
+	require.NoError(stampErr, "SetEmbedGen")
 
 	data.BodyHTML = sql.NullString{String: "<div><span>Rendered body</span></div>", Valid: true}
 	_, err = f.Store.PersistMessage(data)

@@ -11,7 +11,27 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/vector"
 )
+
+func TestMigrateChunkCheckpointsUpgrade(t *testing.T) {
+	require := require.New(t)
+	db := openTestDB(t, filepath.Join(t.TempDir(), "vectors.db"))
+	t.Cleanup(func() { require.NoError(db.Close()) })
+	_, err := db.Exec(schemaSQL)
+	require.NoError(err)
+	_, err = db.Exec(`INSERT INTO index_generations
+		(id, model, dimension, fingerprint, started_at, state) VALUES (1, 'model', 4, 'fingerprint', 1, 'building')`)
+	require.NoError(err)
+	require.NoError(Migrate(t.Context(), db, 4))
+	checkpoints := vector.ChunkCheckpointStore{DB: db, Rebind: func(q string) string { return q }}
+	want := vector.ChunkCheckpoint{MessageID: 1, ChunkIndex: 0, InputHash: "input-hash", Vector: []float32{1, 2, 3, 4}}
+	require.NoError(checkpoints.Save(t.Context(), 1, []vector.ChunkCheckpoint{want}))
+	require.NoError(Migrate(t.Context(), db, 4))
+	got, err := checkpoints.Load(t.Context(), 1, 1)
+	require.NoError(err)
+	assert.Equal(t, map[int]vector.ChunkCheckpoint{0: want}, got, "reopening preserves a resumable request")
+}
 
 func TestMigrate_FreshAndIdempotent(t *testing.T) {
 	ctx := context.Background()

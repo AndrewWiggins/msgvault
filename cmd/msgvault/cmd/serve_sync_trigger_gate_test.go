@@ -26,7 +26,7 @@ func TestSyncTriggerAnsweredWhileScheduledRunHoldsGate(t *testing.T) {
 	assert := assert.New(t)
 	const job = "granola:acct-1"
 	gate := api.NewSerialOperationGate()
-	sched, _ := newServeSchedulers(nil, slog.New(slog.DiscardHandler), nil, gate)
+	sched, _ := newServeSchedulers(nil, slog.New(slog.DiscardHandler), nil, gate, 0)
 	defer func() { <-sched.Stop().Done() }()
 
 	started := make(chan struct{}, 2)

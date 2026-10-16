@@ -1768,6 +1768,12 @@ func (b *Backend) PruneOrphanEmbeddings(ctx context.Context) (int64, error) {
 	const orphanWhere = `NOT EXISTS (
 		SELECT 1 FROM messages m WHERE m.id = e.message_id
 	)`
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vec.embedding_chunk_checkpoints AS c
+		WHERE (c.document_key = '' AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = c.message_id))
+		   OR EXISTS (SELECT 1 FROM vec.index_generations g
+		              WHERE g.id = c.generation_id AND g.state = 'retired')`); err != nil {
+		return 0, fmt.Errorf("delete abandoned embedding checkpoints: %w", err)
+	}
 	var pruned int64
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM (
