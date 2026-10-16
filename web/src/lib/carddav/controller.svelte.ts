@@ -29,7 +29,7 @@ interface VisibilityDocument {
 const FIRST_PAGE_LIMIT = 25;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 8000;
-const IDLE_POLL_MS = 10_000;
+const IDLE_POLL_MS = 30_000;
 export class CardDAVController {
   status = $state<CardDAVStatus>();
   books = $state<CardDAVBook[]>([]);
@@ -460,7 +460,7 @@ export class CardDAVController {
     return !this.disposed && !this.visibilityDocument?.hidden && Boolean(this.status || this.syncPending);
   }
   private hasWork(): boolean {
-    return Boolean(this.status?.active || this.status?.waiting_for_gate || this.status?.scheduler_running || this.syncPending);
+    return Boolean(this.status?.active || this.status?.waiting_for_gate || this.status?.scheduled_job_running || this.syncPending);
   }
   private nextPollDelay(advanced: boolean): number {
     return this.hasWork() ? (advanced ? MIN_POLL_MS : Math.min(MAX_POLL_MS, this.pollDelay * 2)) : IDLE_POLL_MS;
@@ -487,7 +487,7 @@ export class CardDAVController {
     this.pollAbort?.abort();
     const requestController = new AbortController();
     this.pollAbort = requestController;
-    const priorWork = Boolean(this.status?.active || this.status?.waiting_for_gate || this.status?.scheduler_running);
+    const priorWork = Boolean(this.status?.active || this.status?.waiting_for_gate || this.status?.scheduled_job_running);
     try {
       const { data } = await generatedGetCardDAVStatus(
         this.connection ? { connection: this.connection } : undefined,
@@ -508,6 +508,7 @@ export class CardDAVController {
         this.schedulePoll(this.pollDelay);
         return;
       }
+      const terminalChanged = data.latest?.id !== this.status?.latest?.id || data.latest?.state !== this.status?.latest?.state;
       const becameAvailable = !this.status?.available && data.available;
       const fingerprint = statusFingerprint(data);
       const advanced = fingerprint !== this.pollFingerprint;
@@ -515,7 +516,7 @@ export class CardDAVController {
       this.statusError = null;
       this.pollFingerprint = fingerprint;
       this.recordSuccessfulStatusCommit(statusCommit);
-      if (priorWork && !data.active && !data.waiting_for_gate && !data.scheduler_running && !this.syncPending) {
+      if ((priorWork || terminalChanged) && !data.active && !data.waiting_for_gate && !data.scheduled_job_running && !this.syncPending) {
         await this.reconcileTerminal(data.available);
         return;
       }
@@ -591,7 +592,7 @@ function uniqueRuns(runs: CardDAVRun[]): CardDAVRun[] {
 }
 function statusFingerprint(status: CardDAVStatus): string {
   const run = status.active;
-  const queue = `${status.waiting_for_gate ?? false}:${status.queued_since ?? ''}:${status.scheduler_running ?? false}`;
+  const queue = `${status.waiting_for_gate ?? false}:${status.queued_since ?? ''}:${status.scheduled_job_running ?? false}`;
   if (!run) return `idle:${status.latest?.id ?? 0}:${status.latest?.state ?? ''}:${queue}`;
   return [run.id, run.state, run.books, run.created, run.updated, run.removed, queue].join(':');
 }

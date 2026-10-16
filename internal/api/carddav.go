@@ -833,7 +833,7 @@ type CardDAVStatusResponse struct {
 	CredentialConfigured bool                  `json:"credential_configured"`
 	Enabled              bool                  `json:"enabled"`
 	WaitingForGate       bool                  `json:"waiting_for_gate"`
-	SchedulerRunning     bool                  `json:"scheduler_running"`
+	ScheduledJobRunning  bool                  `json:"scheduled_job_running"`
 	QueuedSince          *time.Time            `json:"queued_since,omitempty"`
 	Scheduled            bool                  `json:"scheduled"`
 	Schedule             string                `json:"schedule"`
@@ -1115,7 +1115,7 @@ func (s *Server) handleCardDAVStatus(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			status.Scheduled = true
-			status.SchedulerRunning = status.SchedulerRunning || job.Running
+			status.ScheduledJobRunning = status.ScheduledJobRunning || job.Running
 			if job.Queued {
 				status.WaitingForGate = true
 				if !job.QueuedSince.IsZero() && (status.QueuedSince == nil || job.QueuedSince.Before(*status.QueuedSince)) {

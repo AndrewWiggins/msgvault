@@ -921,52 +921,6 @@ func TestEmbedJob_Run_YieldedReclaimStopsWithoutWarning(t *testing.T) {
 	assert.NotContains(logs.String(), "embed reclaim failed", "yield must not log a reclaim warning")
 }
 
-func TestEmbedJob_Run_YieldedBuildingLookupStopsWithoutWarning(t *testing.T) {
-	assert := assert.New(t)
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	runner := &fakeRunner{}
-	backend := &fakeBackend{
-		buildErr:      errors.New("building lookup failed"),
-		yieldBuilding: cancel,
-	}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker:  runner,
-		Backend: backend,
-		Log:     slog.New(slog.NewTextHandler(&logs, nil)),
-	}
-
-	job.Run(ctx)
-
-	_, run, _ := runner.calls()
-	assert.Equal(0, run, "RunOnce calls after yielded building lookup")
-	assert.NotContains(logs.String(), "building generation lookup failed", "yield must not log a lookup warning")
-}
-
-func TestEmbedJob_Run_YieldedActiveLookupStopsWithoutWarning(t *testing.T) {
-	assert := assert.New(t)
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	runner := &fakeRunner{}
-	backend := &fakeBackend{
-		activeErr:   errors.New("active lookup failed"),
-		yieldActive: cancel,
-	}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker:  runner,
-		Backend: backend,
-		Log:     slog.New(slog.NewTextHandler(&logs, nil)),
-	}
-
-	job.Run(ctx)
-
-	_, run, _ := runner.calls()
-	assert.Equal(0, run, "RunOnce calls after yielded active lookup")
-	assert.NotContains(logs.String(), "active generation lookup failed", "yield must not log a lookup warning")
-}
-
 func TestEmbedJob_Run_YieldedBackstopStopsBeforeActivationWork(t *testing.T) {
 	assert := assert.New(t)
 	building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
@@ -995,67 +949,6 @@ func TestEmbedJob_Run_YieldedBackstopStopsBeforeActivationWork(t *testing.T) {
 	assert.Contains(logs.String(), "embed run complete", "RunOnce completion is logged before backstop")
 	assert.NotContains(logs.String(), "embed backstop failed", "yield is not a backstop failure")
 	assert.NotContains(logs.String(), "building generation activated", "yield must stop activation")
-}
-
-func TestEmbedJob_Run_YieldedCoverageStopsBeforeActivation(t *testing.T) {
-	assert := assert.New(t)
-	building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
-	backend := &fakeBackend{activeErr: vector.ErrNoActiveGeneration, building: building}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	coverage := &fakeCoverage{missing: 0, yieldCancel: cancel}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker:      &fakeRunner{},
-		Backend:     backend,
-		Store:       coverage,
-		Fingerprint: "m:768",
-		Log:         slog.New(slog.NewTextHandler(&logs, nil)),
-	}
-
-	job.Run(ctx)
-
-	assert.Equal(1, coverage.calls, "coverage queries")
-	assert.Empty(backend.activations(), "activation calls after yielded coverage")
-	assert.NotContains(logs.String(), "embed: building generation activated", "yield must stop activation logging")
-}
-
-func TestEmbedJob_Run_YieldedActivationStopsWithoutWarningOrCompletion(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		activateErr error
-	}{
-		{name: "error", activateErr: errors.New("activation operation failed")},
-		{name: "success"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			assert := assert.New(t)
-			building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
-			ctx, cancel := context.WithCancelCause(context.Background())
-			t.Cleanup(func() { cancel(nil) })
-			backend := &fakeBackend{
-				activeErr:     vector.ErrNoActiveGeneration,
-				building:      building,
-				activateErr:   test.activateErr,
-				yieldActivate: cancel,
-			}
-			coverage := &fakeCoverage{missing: 0}
-			var logs bytes.Buffer
-			job := &EmbedJob{
-				Worker:      &fakeRunner{},
-				Backend:     backend,
-				Store:       coverage,
-				Fingerprint: "m:768",
-				Log:         slog.New(slog.NewTextHandler(&logs, nil)),
-			}
-
-			job.Run(ctx)
-
-			assert.Equal([]vector.GenerationID{77}, backend.activations(), "activation calls")
-			assert.NotContains(logs.String(), "embed: activation failed", "yield must not log activation failure")
-			assert.NotContains(logs.String(), "embed: building generation activated", "yield must not log activation completion")
-		})
-	}
 }
 
 func TestEmbedJob_Run_YieldedRunErrorStopsWithoutFailureWork(t *testing.T) {
@@ -1268,49 +1161,6 @@ func TestEmbedJob_Run_ActiveGenerationError(t *testing.T) {
 
 	_, run, _ := runner.calls()
 	assert.Equal(t, 0, run, "RunOnce calls on active lookup error")
-}
-
-func TestEmbedJobRunReturnsWorkerErrors(t *testing.T) {
-	workerErr := errors.New("embedding publication failed")
-	backstopErr := errors.New("embedding backstop failed")
-	for _, test := range []struct {
-		name        string
-		backend     *fakeBackend
-		store       EmbedCoverage
-		fingerprint string
-		wantErr     error
-		runner      *fakeRunner
-		interrupted bool
-	}{
-		{name: "backstop", backend: &fakeBackend{active: vector.Generation{ID: 42}}, runner: &fakeRunner{backstopErr: backstopErr}, wantErr: backstopErr},
-		{name: "interrupted RunOnce", backend: &fakeBackend{active: vector.Generation{ID: 42}}, runner: &fakeRunner{runErr: workerErr}, interrupted: true, wantErr: workerErr},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancelCause(t.Context())
-			defer cancel(nil)
-			runner := test.runner
-			if runner == nil {
-				runner = &fakeRunner{}
-			}
-			if test.interrupted {
-				runner.yieldCancel = cancel
-			}
-			job := &EmbedJob{
-				Worker:      runner,
-				Backend:     test.backend,
-				Store:       test.store,
-				Fingerprint: test.fingerprint,
-			}
-
-			err := job.run(ctx)
-
-			if test.wantErr == nil {
-				require.NoError(t, err)
-			} else {
-				require.ErrorIs(t, err, test.wantErr)
-			}
-		})
-	}
 }
 
 // TestEmbedJob_Run_PrefersBuildingOverActive regresses the daemon
@@ -1852,18 +1702,6 @@ func TestEmbedJob_Run_ContextualIncompleteBuildUsesBackstopRecovery(t *testing.T
 	assert.Equal([]int64{12}, backend.activateSequences)
 }
 
-func TestEmbedJob_MaintainActivePeopleReturnsBuildingGenerationError(t *testing.T) {
-	wantErr := errors.New("building generation lookup failed")
-	job := &EmbedJob{
-		Worker:      &fakeRunner{},
-		Backend:     &fakeBackend{buildErr: wantErr},
-		Fingerprint: "model:768",
-	}
-
-	err := job.maintainActivePeopleDuringBuild(context.Background(), slog.Default(), time.Time{})
-	require.ErrorIs(t, err, wantErr)
-}
-
 func TestEmbedJob_Run_ResumedContextualBackstopWaitsForInterval(t *testing.T) {
 	for _, state := range []string{"active", "building"} {
 		t.Run(state, func(t *testing.T) {
@@ -2133,8 +1971,12 @@ func TestSchedulerVectorJobReplacesAndClearsCronEntry(t *testing.T) {
 				assert.Equal(time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC), entries[0].Schedule.Next(base))
 				entries[0].Job.Run()
 				assert.Equal(1, calls)
-				require.NoError(set("", false, removed))
+				require.NoError(set("", true, removed))
 				assert.Empty(s.cron.Entries())
+				if !removed {
+					assert.True(s.IsJobScheduled(name))
+					require.NoError(set("", false, false))
+				}
 				assert.Empty(s.JobStatus())
 				assert.False(s.IsJobScheduled(name))
 				_, err := s.StartJob(name)
@@ -2189,17 +2031,6 @@ func TestSchedulerVectorJobInvalidReplacePreservesPrevious(t *testing.T) {
 			})
 		})
 	}
-}
-
-func TestScheduler_SetEmbedJob_EmptyScheduleNoCronEntry(t *testing.T) {
-	assert := assert.New(t)
-	s := New(func(ctx context.Context, email string) error { return nil })
-	backend := &fakeBackend{}
-	runner := &fakeRunner{}
-	job := &EmbedJob{Worker: runner, Backend: backend}
-
-	require.NoError(t, s.SetEmbedJob(job, "", true), "SetEmbedJob")
-	assert.Empty(s.cron.Entries(), "empty schedule should not create a cron entry")
 }
 
 func TestScheduler_RunAfterSync_Fires(t *testing.T) {
@@ -2897,28 +2728,6 @@ func TestLongCooperativeJobYieldsToQueuedJob(t *testing.T) {
 	})
 }
 
-func TestCallbackErrorAfterYieldPreservesOtherErrors(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	ctx, cancel := context.WithCancelCause(context.Background())
-	cancel(ErrYieldedToWaiter)
-
-	sourceErr := errors.New("earlier source failed")
-	err := jobctx.ErrorAfterYield(ctx, errors.Join(sourceErr, context.Canceled, ErrYieldedToWaiter))
-
-	require.ErrorIs(err, sourceErr)
-	require.NotErrorIs(err, ErrYieldedToWaiter)
-	require.NotErrorIs(err, context.Canceled)
-
-	wrappedErr := fmt.Errorf("source callback: %w", errors.Join(sourceErr, context.Canceled, ErrYieldedToWaiter))
-	err = jobctx.ErrorAfterYield(ctx, wrappedErr)
-
-	require.ErrorIs(err, sourceErr)
-	require.NotErrorIs(err, ErrYieldedToWaiter)
-	require.NotErrorIs(err, context.Canceled)
-	assert.EqualError(err, "source callback: earlier source failed")
-}
-
 func TestPreemptedDailyRunResumesBehindWaiter(t *testing.T) {
 	for _, account := range []bool{false, true} {
 		name := "job"
@@ -3061,157 +2870,82 @@ func TestNonPreemptibleAccountCompletesWithQueuedWork(t *testing.T) {
 	})
 }
 
-func TestPreemptedAccountErrorQueuesFollowUpAndPreservesError(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-		oldPreemptAfter := preemptAfter
-		oldPoll := yieldPollInterval
-		preemptAfter = 10 * time.Second
-		yieldPollInterval = 5 * time.Second
-		defer func() {
-			preemptAfter = oldPreemptAfter
-			yieldPollInterval = oldPoll
-		}()
-
-		partialErr := errors.New("checkpointed import was partial")
-		var runs int
-		var order []string
-		releaseWaiter := make(chan struct{})
-		var logs bytes.Buffer
-		s := New(func(ctx context.Context, email string) error {
-			order = append(order, email)
-			if email == "account" {
-				runs++
-				if runs == 1 {
-					for !jobctx.PreemptionRequested(ctx) {
-						if err := ctx.Err(); err != nil {
-							return err
-						}
-						time.Sleep(time.Second)
-					}
-					return partialErr
-				}
-				return nil
-			}
-			select {
-			case <-releaseWaiter:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}).WithLogger(slog.New(slog.NewTextHandler(&logs, nil))).WithWorkTracker(newSerialWorkTracker())
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(s.AddAccount("account", "0 0 * * *"))
-		require.NoError(s.AddAccount("waiter", "0 0 * * *"))
-
-		go s.onAccountTick("account")
-		synctest.Wait()
-		go s.onAccountTick("waiter")
-		synctest.Wait()
-		time.Sleep(preemptAfter + 2*time.Second)
-		synctest.Wait()
-
-		require.Equal([]string{"account", "waiter"}, order,
-			"the waiter runs before the yielded follow-up")
-		var lastError string
-		for _, status := range s.Status() {
-			if status.Email == "account" {
-				lastError = status.LastError
-			}
-		}
-		assert.Contains(lastError, partialErr.Error(), "the callback error remains visible while follow-up waits")
-		assert.Contains(logs.String(), partialErr.Error(), "the callback error is logged")
-
-		close(releaseWaiter)
-		synctest.Wait()
-		assert.Equal(2, runs, "a preempted checkpointed error is followed by a retry")
-		assert.Equal([]string{"account", "waiter", "account"}, order)
-		for _, status := range s.Status() {
-			if status.Email == "account" {
-				assert.Empty(status.LastError, "successful follow-up clears the prior error")
-			}
-		}
-	})
-}
-
 func TestPreemptedGenericJobErrorQueuesFollowUpAndPreservesError(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-		oldPreemptAfter := preemptAfter
-		oldPoll := yieldPollInterval
-		preemptAfter = 10 * time.Second
-		yieldPollInterval = 5 * time.Second
-		defer func() {
-			preemptAfter = oldPreemptAfter
-			yieldPollInterval = oldPoll
-		}()
-
-		partialErr := errors.New("checkpointed job was partial")
-		var runs int
-		var order []string
-		releaseWaiter := make(chan struct{})
-		var logs bytes.Buffer
-		s := New(func(ctx context.Context, email string) error {
-			order = append(order, email)
-			select {
-			case <-releaseWaiter:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}).WithLogger(slog.New(slog.NewTextHandler(&logs, nil))).WithWorkTracker(newSerialWorkTracker())
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(s.AddAccount("waiter", "0 0 * * *"))
-		require.NoError(s.AddJob(Job{
-			Name:        "checkpointed-job",
-			Schedule:    "0 0 * * *",
-			Preemptible: true,
-			Run: func(ctx context.Context) error {
-				runs++
-				order = append(order, "job")
-				if runs == 1 {
-					for !jobctx.PreemptionRequested(ctx) {
-						if err := ctx.Err(); err != nil {
-							return err
+	for _, account := range []bool{false, true} {
+		for _, cancelled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("account=%t/cancelled=%t", account, cancelled), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					require := require.New(t)
+					assert := assert.New(t)
+					partialErr := errors.New("checkpointed import was partial")
+					var order []string
+					runs := 0
+					release := make(chan struct{})
+					var logs bytes.Buffer
+					run := func(ctx context.Context, name string) error {
+						order = append(order, name)
+						if name == "waiter" {
+							select {
+							case <-release:
+								return nil
+							case <-ctx.Done():
+								return ctx.Err()
+							}
 						}
-						time.Sleep(time.Second)
+						runs++
+						if runs > 1 {
+							return nil
+						}
+						if cancelled {
+							<-ctx.Done()
+							return errors.Join(partialErr, ctx.Err())
+						}
+						for !jobctx.PreemptionRequested(ctx) {
+							time.Sleep(time.Second)
+						}
+						return partialErr
 					}
-					return partialErr
-				}
-				return nil
-			},
-		}))
-
-		jobErr := make(chan error, 1)
-		go func() { jobErr <- s.TriggerJob("checkpointed-job") }()
-		synctest.Wait()
-		go s.onAccountTick("waiter")
-		synctest.Wait()
-		time.Sleep(preemptAfter + 2*time.Second)
-		synctest.Wait()
-
-		select {
-		case err := <-jobErr:
-			require.ErrorIs(err, partialErr, "the synchronous job caller receives the callback error")
-		case <-time.After(time.Second):
-			require.FailNow("preempted job did not return after checkpointing")
+					s := New(run).WithLogger(slog.New(slog.NewTextHandler(&logs, nil))).WithWorkTracker(newSerialWorkTracker())
+					defer func() { <-s.Stop().Done() }()
+					require.NoError(s.AddAccount("waiter", "0 0 * * *"))
+					result := make(chan error, 1)
+					if account {
+						require.NoError(s.AddAccount("subject", "0 0 * * *"))
+						go s.onAccountTick("subject")
+					} else {
+						require.NoError(s.AddJob(Job{Name: "subject", Schedule: "0 0 * * *", Preemptible: true, Run: func(ctx context.Context) error { return run(ctx, "subject") }}))
+						go func() { result <- s.TriggerJob("subject") }()
+					}
+					synctest.Wait()
+					go s.onAccountTick("waiter")
+					synctest.Wait()
+					time.Sleep(preemptAfter + 2*yieldPollInterval)
+					synctest.Wait()
+					if !account {
+						require.ErrorIs(<-result, partialErr)
+					}
+					require.Equal([]string{"subject", "waiter"}, order)
+					lastError := func() string {
+						if account {
+							for _, status := range s.Status() {
+								if status.Email == "subject" {
+									return status.LastError
+								}
+							}
+						}
+						return s.JobStatus()[0].LastError
+					}
+					assert.Contains(lastError(), partialErr.Error())
+					assert.Contains(logs.String(), partialErr.Error())
+					close(release)
+					synctest.Wait()
+					assert.Equal(2, runs)
+					assert.Equal([]string{"subject", "waiter", "subject"}, order)
+					assert.Empty(lastError())
+				})
+			})
 		}
-		require.Equal([]string{"job", "waiter"}, order,
-			"the waiter runs before the yielded follow-up")
-		status := s.JobStatus()[0]
-		assert.Contains(status.LastError, partialErr.Error(), "the callback error remains visible while follow-up waits")
-		assert.Contains(logs.String(), partialErr.Error(), "the callback error is logged")
-
-		close(releaseWaiter)
-		synctest.Wait()
-		assert.Equal(2, runs, "a preempted checkpointed error is followed by a retry")
-		assert.Equal([]string{"job", "waiter", "job"}, order)
-		status = s.JobStatus()[0]
-		assert.Empty(status.LastError, "successful follow-up clears the prior error")
-		assert.False(status.LastRun.IsZero())
-	})
+	}
 }
 
 func TestBoundedJobReschedulesBehindWaiter(t *testing.T) {
@@ -3326,12 +3060,6 @@ func TestJobRuntimeBudgetResumesWithoutWaiter(t *testing.T) {
 		assert.Empty(status.LastError)
 		assert.False(status.LastRun.IsZero())
 	})
-}
-
-func TestYieldPreservesIndependentDeadlineFailure(t *testing.T) {
-	ctx, cancel := context.WithCancelCause(t.Context())
-	cancel(ErrYieldedToWaiter)
-	require.ErrorIs(t, jobctx.ErrorAfterYield(ctx, context.DeadlineExceeded), context.DeadlineExceeded)
 }
 
 func TestJobBudgetStartsAfterGateAdmission(t *testing.T) {

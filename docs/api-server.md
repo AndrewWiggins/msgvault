@@ -2474,10 +2474,9 @@ passes and support the same one-minute preemption. A budget expiry resumes
 immediately only after committed progress; otherwise `last_error` reports the
 failure and the job waits for the next trigger.
 Other jobs keep their own runtime budgets. Waiting API requests can still
-interrupt scheduled work. `GET /api/v1/sources/status` reports whether each
-scheduled source is queued (`scheduler_queued`), has a follow-up pending
-(`scheduler_pending`), and when its current run started (`scheduler_started_at`).
-Compare queued state and the last successful sync
+interrupt scheduled work. `GET /api/v1/sources/status` reports the same
+state for every scheduled source as `scheduler_queued`, `scheduler_pending`,
+and `scheduler_started_at`. Compare queued state and the last successful sync
 to detect a source that is waiting too long. Health's `operation.label` names
 the job holding the gate, such as `activity-projection` or `attachment-pack`.
 
@@ -2490,9 +2489,9 @@ the job holding the gate, such as `activity-projection` or `attachment-pack`.
 On unreleased `main`, `waiting_for_gate` and optional `queued_since` describe
 the connection selected by `?connection=<name>`. Without a selector, they
 report any waiting CardDAV job and the oldest queue time. `next_scheduled_at`
-is the next cron tick, even while a run waits. `scheduler_running` reports
+is the next cron tick, even while a run waits. `scheduled_job_running` reports
 matching scheduled work that has started, including before an `active` run
-appears. Keep polling while `waiting_for_gate`, `scheduler_running`, or
+appears. Keep polling while `waiting_for_gate`, `scheduled_job_running`, or
 `active` indicates work; refresh address books and history when all three clear.
 
 ---

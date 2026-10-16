@@ -444,7 +444,7 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 		var status CardDAVStatusResponse
 		require.NoError(json.NewDecoder(response.Body).Decode(&status))
 		assertions.Equal(tc.scheduled, status.Scheduled)
-		assertions.Equal(tc.running, status.SchedulerRunning)
+		assertions.Equal(tc.running, status.ScheduledJobRunning)
 		assertions.Equal(!tc.since.IsZero(), status.WaitingForGate)
 		if !tc.since.IsZero() {
 			require.NotNil(status.QueuedSince)
@@ -481,7 +481,7 @@ func TestCardDAVStatusTracksSchedulerAdmissionAndCompletion(t *testing.T) {
 	require.Equal(http.StatusOK, response.Code, response.Body.String())
 	var finished CardDAVStatusResponse
 	require.NoError(json.NewDecoder(response.Body).Decode(&finished))
-	assertions.False(finished.SchedulerRunning)
+	assertions.False(finished.ScheduledJobRunning)
 	require.NotNil(finished.Latest, "archive snapshot must follow the scheduler snapshot")
 	assertions.Equal(completedID, finished.Latest.ID)
 	assertions.Equal("succeeded", finished.Latest.State)

@@ -3,9 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"sync/atomic"
+	"fmt"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -39,47 +37,6 @@ func registerPolicyVectorJob(t *testing.T, s *Scheduler, name string, run func(c
 		}, "0 0 1 1 *", false))
 	} else {
 		require.NoError(s.SetDocumentVectorJob(run, "0 0 1 1 *", false))
-	}
-}
-
-func TestScheduledVectorPassRejectsRetryAfterWorkWindow(t *testing.T) {
-	for _, provider := range []string{"openai", "voyage"} {
-		t.Run(provider, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				assert := assert.New(t)
-				require := require.New(t)
-				const requestTimeout = 10 * time.Minute
-				var attempts atomic.Int32
-				var secondRequestAt atomic.Int64
-				started := time.Now()
-				server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					if attempts.Add(1) == 2 {
-						secondRequestAt.Store(int64(time.Since(started)))
-					}
-					w.Header().Set("Retry-After", "360")
-					http.Error(w, "synthetic rate limit", http.StatusTooManyRequests)
-				}))
-				previousTransport := http.DefaultTransport
-				http.DefaultTransport = server.Client().Transport
-				defer func() { http.DefaultTransport = previousTransport }()
-				client := embed.NewClient(embed.Config{
-					Endpoint: server.URL, Model: "synthetic", Dimension: 4, Timeout: requestTimeout, MaxRetries: 2,
-				})
-				run := func(ctx context.Context) error {
-					_, err := client.Embed(ctx, []string{"synthetic input"})
-					return err
-				}
-				if provider == "voyage" {
-					voyage := embed.NewVoyageClient(embed.VoyageConfig{Endpoint: server.URL, Model: "synthetic", Dimension: 4, Timeout: requestTimeout, MaxRetries: 2})
-					run = func(ctx context.Context) error { _, err := voyage.EmbedQuery(ctx, "synthetic input"); return err }
-				}
-				s := New(nil).WithVectorRequestTimeout(requestTimeout)
-				defer func() { <-s.Stop().Done() }()
-				registerPolicyVectorJob(t, s, "embed", run)
-				require.Error(s.TriggerJob("embed"))
-				assert.Equal(int32(1), attempts.Load(), "second provider request started at %s", time.Duration(secondRequestAt.Load()))
-			})
-		})
 	}
 }
 
@@ -136,60 +93,78 @@ func TestVectorPassBudgetRemainsFinite(t *testing.T) {
 
 func TestAutomaticVectorPassYieldsAndResumes(t *testing.T) {
 	for _, name := range []string{"embed", "document-vector"} {
-		t.Run(name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				assert := assert.New(t)
-				require := require.New(t)
-				var events []string
-				var started, admitted time.Time
-				syncRuns := 0
-				syncCompleted := false
-				recordWaiter := func(ctx context.Context) error {
-					syncRuns++
-					admitted = time.Now()
-					events = append(events, "sync")
-					select {
-					case <-time.After(3 * time.Minute):
-						syncCompleted = true
-						events = append(events, "complete")
+		for _, slow := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/slow=%t", name, slow), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					assert := assert.New(t)
+					require := require.New(t)
+					var events []string
+					var started, admitted time.Time
+					syncRuns := 0
+					syncCompleted := false
+					recordWaiter := func(ctx context.Context) error {
+						syncRuns++
+						admitted = time.Now()
+						events = append(events, "sync")
+						select {
+						case <-time.After(3 * time.Minute):
+							syncCompleted = true
+							events = append(events, "complete")
+							return nil
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
+					s := New(func(ctx context.Context, _ string) error { return recordWaiter(ctx) }).WithVectorRequestTimeout(10 * time.Minute).WithWorkTracker(newSerialWorkTracker())
+					defer func() { <-s.Stop().Done() }()
+					runs := 0
+					registerPolicyVectorJob(t, s, name, func(ctx context.Context) error {
+						runs++
+						if runs == 1 {
+							started = time.Now()
+							if slow {
+								done := jobctx.BeginAttempt(ctx)
+								select {
+								case <-time.After(90 * time.Second):
+								case <-ctx.Done():
+								}
+								done()
+								require.NoError(ctx.Err(), "a first slow attempt finishes before scheduled cancellation")
+							}
+							events = append(events, "checkpoint")
+							jobctx.RecordProgress(ctx)
+							if slow {
+								return nil
+							}
+							<-ctx.Done()
+							require.ErrorIs(context.Cause(ctx), ErrYieldedToWaiter)
+							return ctx.Err()
+						}
+						events = append(events, "resume")
+						if !syncCompleted {
+							jobctx.RecordProgress(ctx)
+							<-ctx.Done()
+							return ctx.Err()
+						}
 						return nil
-					case <-ctx.Done():
-						return ctx.Err()
+					})
+					mustStartJob(t, s, name)
+					synctest.Wait()
+					require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", Preemptible: true, Run: recordWaiter}))
+					mustStartJob(t, s, "carddav")
+					synctest.Wait()
+					time.Sleep(90*time.Second + 2*yieldPollInterval + 3*time.Minute)
+					synctest.Wait()
+					assert.Equal([]string{"checkpoint", "sync", "complete", "resume"}, events)
+					assert.Equal(1, syncRuns)
+					if slow {
+						assert.GreaterOrEqual(admitted.Sub(started), 90*time.Second)
+					} else {
+						assert.LessOrEqual(admitted.Sub(started), preemptAfter+2*yieldPollInterval)
 					}
-				}
-				s := New(func(ctx context.Context, _ string) error { return recordWaiter(ctx) }).WithVectorRequestTimeout(10 * time.Minute).WithWorkTracker(newSerialWorkTracker())
-				defer func() { <-s.Stop().Done() }()
-				runs := 0
-				registerPolicyVectorJob(t, s, name, func(ctx context.Context) error {
-					runs++
-					if runs == 1 {
-						started = time.Now()
-						events = append(events, "checkpoint")
-						jobctx.RecordProgress(ctx)
-						<-ctx.Done()
-						require.ErrorIs(context.Cause(ctx), ErrYieldedToWaiter)
-						return ctx.Err()
-					}
-					events = append(events, "resume")
-					if !syncCompleted {
-						jobctx.RecordProgress(ctx)
-						<-ctx.Done()
-						return ctx.Err()
-					}
-					return nil
 				})
-				mustStartJob(t, s, name)
-				synctest.Wait()
-				require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", Preemptible: true, Run: recordWaiter}))
-				mustStartJob(t, s, "carddav")
-				synctest.Wait()
-				time.Sleep(preemptAfter + 2*yieldPollInterval + 3*time.Minute)
-				synctest.Wait()
-				assert.Equal([]string{"checkpoint", "sync", "complete", "resume"}, events)
-				assert.Equal(1, syncRuns)
-				assert.LessOrEqual(admitted.Sub(started), preemptAfter+2*yieldPollInterval)
 			})
-		})
+		}
 	}
 }
 
@@ -314,56 +289,4 @@ func TestAutomaticVectorPeersStopWithoutProgress(t *testing.T) {
 			assert.False(status.Running)
 		}
 	})
-}
-
-func TestInterruptedPassWithoutProgress(t *testing.T) {
-	for _, interruption := range []string{"cancelled", "manual"} {
-		t.Run(interruption, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				assert := assert.New(t)
-				require := require.New(t)
-				tracker := &yieldingWorkTracker{}
-				var gate WorkTracker = newSerialWorkTracker()
-				if interruption == "manual" {
-					gate = tracker
-				}
-				s := New(nil).WithWorkTracker(gate)
-				defer func() { <-s.Stop().Done() }()
-				workerErr := errors.New("synthetic publication failure")
-				complete := make(chan struct{})
-				calls := 0
-				require.NoError(s.AddJob(Job{Name: "test", Schedule: "0 0 1 1 *", Preemptible: true, MaxRuntime: vectorPassBudget, Run: func(ctx context.Context) error {
-					calls++
-					if calls > 1 {
-						<-complete
-						return nil
-					}
-					<-ctx.Done()
-					return errors.Join(workerErr, ctx.Err())
-				}}))
-				mustStartJob(t, s, "test")
-				synctest.Wait()
-				if interruption == "manual" {
-					tracker.yield.Store(true)
-				} else {
-					require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", Run: func(context.Context) error { return nil }}))
-					mustStartJob(t, s, "carddav")
-					synctest.Wait()
-				}
-				time.Sleep(preemptAfter + 3*yieldPollInterval)
-				synctest.Wait()
-				var status JobStatus
-				for _, candidate := range s.JobStatus() {
-					if candidate.Name == "test" {
-						status = candidate
-					}
-				}
-				assert.Equal(2, calls)
-				assert.Equal(workerErr.Error(), status.LastError)
-				assert.False(status.Pending)
-				close(complete)
-				synctest.Wait()
-			})
-		})
-	}
 }

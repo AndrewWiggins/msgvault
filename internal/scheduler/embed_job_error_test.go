@@ -1,11 +1,11 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
-	"testing/synctest"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +25,17 @@ func TestEmbedJobRunPreservesErrorsDuringInterruption(t *testing.T) {
 		name      string
 		configure func(*EmbedJob, *fakeBackend, context.CancelCauseFunc)
 	}{
+		{"backstop", func(job *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
+			backend.building = nil
+			backend.active = vector.Generation{ID: 42}
+			backend.activeErr = nil
+			job.Fingerprint = ""
+			job.BackstopInterval = 0
+			job.Worker = &fakeRunner{backstopErr: failure, yieldBackstop: interrupt}
+		}},
+		{"interrupted RunOnce", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
+			job.Worker = &fakeRunner{runErr: failure, yieldCancel: interrupt}
+		}},
 		{"target building lookup", func(job *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Fingerprint = ""
 			backend.buildErr, backend.yieldBuilding = failure, interrupt
@@ -61,6 +72,9 @@ func TestEmbedJobRunPreservesErrorsDuringInterruption(t *testing.T) {
 		{"activation", func(_ *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			backend.activateErr, backend.yieldActivate = failure, interrupt
 		}},
+		{"activation success", func(_ *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
+			backend.yieldActivate = interrupt
+		}},
 		{"sequence-bound activation", func(job *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			backend.activateErr, backend.yieldActivate = failure, interrupt
 			job.SequenceBoundActivation = true
@@ -69,13 +83,17 @@ func TestEmbedJobRunPreservesErrorsDuringInterruption(t *testing.T) {
 			}}
 		}},
 	} {
-		for _, interruption := range []string{"cooperative", "cancelled"} {
+		for _, interruption := range []string{"none", "cooperative", "cancelled"} {
 			t.Run(test.name+"/"+interruption, func(t *testing.T) {
 				require := require.New(t)
+				assert := assert.New(t)
 				ctx, cancel := context.WithCancelCause(t.Context())
 				defer cancel(nil)
 				ctx, request := jobctx.WithPreemption(ctx)
-				interrupt := cancel
+				interrupt := context.CancelCauseFunc(func(error) {})
+				if interruption == "cancelled" {
+					interrupt = cancel
+				}
 				if interruption == "cooperative" {
 					interrupt = func(error) { request() }
 				}
@@ -83,88 +101,43 @@ func TestEmbedJobRunPreservesErrorsDuringInterruption(t *testing.T) {
 					building:  &vector.Generation{ID: 9, State: vector.GenerationBuilding, Fingerprint: "m:768"},
 					activeErr: vector.ErrNoActiveGeneration,
 				}
+				var logs bytes.Buffer
+				runner := &fakeRunner{}
 				job := &EmbedJob{
-					Worker: &fakeRunner{}, Backend: backend, Store: &fakeCoverage{},
+					Log:    slog.New(slog.NewTextHandler(&logs, nil)),
+					Worker: runner, Backend: backend, Store: &fakeCoverage{},
 					Fingerprint: "m:768", BackstopInterval: -1,
 				}
 				test.configure(job, backend, interrupt)
 
 				err := job.run(ctx)
 
-				require.ErrorIs(err, failure)
-				require.ErrorIs(jobctx.ErrorAfterYield(ctx, err), failure)
-				if interruption == "cooperative" {
-					assert.True(t, jobctx.PreemptionRequested(ctx))
-					require.NoError(ctx.Err())
+				if test.name == "activation success" {
+					require.NoError(err)
 				} else {
+					require.ErrorIs(err, failure)
+					require.ErrorIs(jobctx.ErrorAfterYield(ctx, err), failure)
+				}
+				if interruption != "none" {
+					assert.NotContains(logs.String(), "generation lookup failed")
+					assert.NotContains(logs.String(), "activation failed")
+					assert.NotContains(logs.String(), "building generation activated")
+					if test.name == "coverage" {
+						assert.Empty(backend.activations())
+					}
+					if test.name == "target building lookup" || test.name == "target active lookup" {
+						_, runs, _ := runner.calls()
+						assert.Zero(runs)
+					}
+				}
+				switch interruption {
+				case "cooperative":
+					assert.True(jobctx.PreemptionRequested(ctx))
+					require.NoError(ctx.Err())
+				case "cancelled":
 					require.ErrorIs(context.Cause(ctx), jobctx.ErrYieldedToWaiter)
 				}
 			})
 		}
 	}
-}
-
-func TestEmbeddingPreemptionRecordsConvergenceFailure(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-		s := New(nil).WithWorkTracker(newSerialWorkTracker())
-		resume := make(chan struct{})
-		defer func() {
-			close(resume)
-			<-s.Stop().Done()
-		}()
-		failure := errors.New("independent convergence database failure")
-		queryResult := make(chan struct{})
-		var queryCtx context.Context
-		runs, checks := 0, 0
-		job := &EmbedJob{
-			Worker: &policyEmbedRunner{run: func(context.Context) error {
-				runs++
-				if runs > 1 {
-					<-resume
-				}
-				return nil
-			}},
-			Backend: &fakeBackend{
-				building: &vector.Generation{ID: 9, State: vector.GenerationBuilding, Fingerprint: "m:768"},
-			},
-			Fingerprint: "m:768",
-			Convergence: convergenceCheckerFunc(func(ctx context.Context, _ vector.GenerationID) (ConvergenceResult, error) {
-				checks++
-				if checks != 2 {
-					return ConvergenceResult{}, nil
-				}
-				queryCtx = ctx
-				select {
-				case <-queryResult:
-				case <-ctx.Done():
-					return ConvergenceResult{}, ctx.Err()
-				}
-				return ConvergenceResult{}, failure
-			}),
-		}
-		require.NoError(s.SetEmbedJob(job, "0 0 1 1 *", false))
-		mustStartJob(t, s, "embed")
-		synctest.Wait()
-		require.NoError(s.AddJob(Job{Name: "sync", Schedule: "0 0 1 1 *", Run: func(context.Context) error { return nil }}))
-		mustStartJob(t, s, "sync")
-		synctest.Wait()
-		time.Sleep(preemptAfter)
-		synctest.Wait()
-		require.NotNil(queryCtx)
-		require.True(jobctx.PreemptionRequested(queryCtx))
-		require.NoError(queryCtx.Err(), "the query fails before forced cancellation")
-		close(queryResult)
-		synctest.Wait()
-
-		assert.Equal(2, runs, "embedding resumes after yielding to the queued sync")
-		var status JobStatus
-		for _, candidate := range s.JobStatus() {
-			if candidate.Name == "embed" {
-				status = candidate
-			}
-		}
-		assert.Equal(failure.Error(), status.LastError)
-	})
 }

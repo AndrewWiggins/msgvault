@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/vector"
 )
 
@@ -785,5 +787,55 @@ func TestClient_Embed_RejectsExtraOrDuplicateResponseItems(t *testing.T) {
 			require.Error(t, err)
 			assert.ErrorIs(t, err, vector.ErrInvalidProviderShape)
 		})
+	}
+}
+
+func TestScheduledVectorPassRejectsRetryAfterWorkWindow(t *testing.T) {
+	for _, provider := range []string{"openai", "voyage"} {
+		for _, preempt := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/preempt=%t", provider, preempt), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					assert := assert.New(t)
+					require := require.New(t)
+					const requestTimeout = 10 * time.Minute
+					ctx := jobctx.WithProgress(jobctx.WithWorkWindow(t.Context(), 5*time.Minute))
+					var observedInFlight atomic.Bool
+					var attempts atomic.Int32
+					var secondRequestAt atomic.Int64
+					started := time.Now()
+					server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						observedInFlight.Store(jobctx.HasInFlightAttempt(ctx))
+						if attempts.Add(1) == 2 {
+							secondRequestAt.Store(int64(time.Since(started)))
+						}
+						w.Header().Set("Retry-After", "360")
+						http.Error(w, "synthetic rate limit", http.StatusTooManyRequests)
+					}))
+
+					client := NewClient(Config{
+						Endpoint: "http://example.com", Model: "synthetic", Dimension: 4, Timeout: requestTimeout, MaxRetries: 2,
+					})
+					client.http.Transport = server.Client().Transport
+					run := func(ctx context.Context) error {
+						_, err := client.Embed(ctx, []string{"synthetic input"})
+						return err
+					}
+					if provider == "voyage" {
+						voyage := NewVoyageClient(VoyageConfig{Endpoint: "http://example.com", Model: "synthetic", Dimension: 4, Timeout: requestTimeout, MaxRetries: 2})
+						voyage.http.Transport = beforeRequestTransport{base: server.Client().Transport}
+						run = func(ctx context.Context) error { _, err := voyage.EmbedQuery(ctx, "synthetic input"); return err }
+					}
+					if preempt {
+						var request func()
+						ctx, request = jobctx.WithPreemption(jobctx.WithProgress(t.Context()))
+						go func() { time.Sleep(time.Minute); request() }()
+					}
+					require.ErrorIs(run(ctx), jobctx.ErrRunBudgetExceeded)
+					assert.True(observedInFlight.Load(), "admitted attempt is tracked until the response closes")
+					assert.False(jobctx.HasInFlightAttempt(ctx), "closed response releases attempt tracking")
+					assert.Equal(int32(1), attempts.Load(), "second provider request started at %s", time.Duration(secondRequestAt.Load()))
+				})
+			})
+		}
 	}
 }

@@ -13,6 +13,9 @@ func TestRewriteGeneratedValidatorsRepairsKnownGeneratorGaps(t *testing.T) {
 	assertions := assert.New(t)
 	got, err := RewriteGeneratedValidators([]byte(generatedValidatorFixture()))
 	require.NoError(t, err)
+	assertions.NotContains(string(got), "if j.Schedule != nil")
+	assertions.NotContains(string(got), "any(j.Schedule).(runtime.Validator)")
+	assertions.Contains(string(got), `typesValidator.Var(j.Schedule, "required")`)
 	assertions.NotContains(string(got), "if f.Filename != nil")
 	assertions.NotContains(string(got), "if f.MimeType != nil")
 	assertions.NotContains(string(got), "if p.Filename != nil")
@@ -173,7 +176,15 @@ func (e ExploreGroupsHTTPRequest) Validate() error {
 func (f FileGroupsHTTPRequest) Validate() error {
 	var errors runtime.ValidationErrors
 }
-` + requiredStringPointerValidatorFixture("JobStatus", "j", "Schedule") + pointerValidatorFixture("FileMetadataResponse", "f") + pointerValidatorFixture("FileSearchRow", "f") +
+` + `func (j JobStatus) Validate() error {
+ var errors runtime.ValidationErrors
+	if v, ok := any(j.Schedule).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Schedule", err)
+		}
+	}
+}
+` + pointerValidatorFixture("FileMetadataResponse", "f") + pointerValidatorFixture("FileSearchRow", "f") +
 		pointerValidatorFixture("PersonFileSearchRow", "p") +
 		requiredStringPointerValidatorFixture("FileSuggestionRow", "f", "MimeType") +
 		requiredStringPointerValidatorFixture("PersonFileSuggestionRow", "p", "MimeType") +

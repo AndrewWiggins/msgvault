@@ -971,7 +971,9 @@ var preemptAfter = time.Minute
 // is queued to resume after the waiter. Preemptible contexts also carry a
 // cooperative preemption request (see jobctx.WithPreemption), raised once the
 // run has held the gate for preemptAfter while other scheduled runs queue
-// behind it. Jobs that have not stopped at the next poll are cancelled with
+// behind it. Jobs that have not stopped at the next poll are cancelled unless an admitted
+// provider attempt is still running and the pass has saved no progress. The
+// hard runtime bounds that exception. Other interrupted jobs are cancelled with
 // ErrYieldedToWaiter. A positive maxRuntime ends the run with cause
 // jobctx.ErrRunBudgetExceeded. Other jobs keep their own runtime budgets. The
 // returned stop function must be called when the job finishes.
@@ -1001,7 +1003,7 @@ func (s *Scheduler) jobContext(label string, preemptible bool, maxRuntime time.D
 					cancel(ErrYieldedToWaiter)
 					return
 				}
-				if preempted {
+				if preempted && (!jobctx.HasInFlightAttempt(ctx) || jobctx.HasProgress(ctx)) {
 					cancel(ErrYieldedToWaiter)
 					return
 				}
@@ -1012,8 +1014,8 @@ func (s *Scheduler) jobContext(label string, preemptible bool, maxRuntime time.D
 						"held", time.Since(started).Round(time.Second))
 					requestPreemption()
 					// Give cooperative jobs one poll interval to reach a safe
-					// checkpoint, then cancel with the recognized yield cause so
-					// other sources still release the work gate.
+					// checkpoint. An admitted provider attempt with no saved
+					// progress gets the remaining hard runtime to finish.
 				}
 			}
 		}

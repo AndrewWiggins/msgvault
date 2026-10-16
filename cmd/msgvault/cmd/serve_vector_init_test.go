@@ -333,18 +333,22 @@ func TestRegisterDocumentVectorJobRequiresDocumentEmbeddingsAndBackend(t *testin
 
 func TestServeVectorRequestTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
 		const requestTimeout = 10 * time.Minute
-		sched, media := newServeSchedulers(nil, testDiscardLogger(), nil, nil, requestTimeout)
-		defer func() { <-serveSchedulers{sched, media}.Stop().Done() }()
-		require.NoError(sched.SetDocumentVectorJob(func(ctx context.Context) error {
-			deadline, bounded := ctx.Deadline()
-			require.True(bounded)
-			assert.Equal(5*time.Minute+requestTimeout+5*time.Second, time.Until(deadline))
-			return nil
-		}, "0 0 1 1 *", false))
-		require.NoError(sched.TriggerJob("document-vector"))
+		var budgets []time.Duration
+		for _, timeout := range []time.Duration{0, requestTimeout} {
+			sched, media := newServeSchedulers(nil, testDiscardLogger(), nil, nil, timeout)
+			require.NoError(t, sched.SetDocumentVectorJob(func(ctx context.Context) error {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					return errors.New("vector job has no deadline")
+				}
+				budgets = append(budgets, time.Until(deadline))
+				return nil
+			}, "0 0 1 1 *", false))
+			require.NoError(t, sched.TriggerJob("document-vector"))
+			<-serveSchedulers{sched, media}.Stop().Done()
+		}
+		assert.Equal(t, requestTimeout-30*time.Second, budgets[1]-budgets[0])
 	})
 }
 

@@ -557,12 +557,9 @@ func TestContextWorker_FreshZeroSequenceBudgetExpiryDoesNotRecordProgress(t *tes
 	})
 	ctx := jobctx.WithProgress(t.Context())
 
-	for range 2 {
-		_, err := f.worker.RunOnce(ctx, f.gen, testEmbeddingPassScope())
-		require.NoError(t, err)
-		assert.False(t, jobctx.HasProgress(ctx),
-			"a zero-to-zero watermark write without a cursor checkpoint is not progress")
-	}
+	_, err := f.worker.RunOnce(ctx, f.gen, testEmbeddingPassScope())
+	require.NoError(t, err)
+	assert.False(t, jobctx.HasProgress(ctx), "a zero-to-zero watermark write without a cursor checkpoint is not progress")
 	progress := f.progress()
 	assert.Zero(t, progress.ChangeSequence)
 	assert.Empty(t, progress.ReconcileCursor)

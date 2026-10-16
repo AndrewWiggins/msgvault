@@ -2147,7 +2147,7 @@ components:
           type: string
         scheduled:
           type: boolean
-        scheduler_running:
+        scheduled_job_running:
           type: boolean
         waiting_for_gate:
           type: boolean
@@ -2157,7 +2157,7 @@ components:
         - credential_configured
         - enabled
         - waiting_for_gate
-        - scheduler_running
+        - scheduled_job_running
         - scheduled
         - schedule
       type: object

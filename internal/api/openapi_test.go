@@ -78,6 +78,11 @@ func TestQueuedWorkOpenAPIFields(t *testing.T) {
 			require.NotNil(schema, schemaName)
 			for _, field := range fields {
 				assert.Contains(schema.Properties, field, schemaName)
+				if schemaName == "JobStatus" {
+					require.NotNil(schema.Properties["next_run"])
+					assert.NotContains(schema.Required, "next_run")
+					assert.Equal("date-time", schema.Properties["next_run"].Format)
+				}
 			}
 		}
 	}
@@ -1865,7 +1870,7 @@ func TestCardDAVStatusAndRunHistoryOpenAPIContract(t *testing.T) {
 	statusSchema := doc.Components.Schemas.Map()["CardDAVStatusResponse"]
 	requirements.NotNil(statusSchema)
 	assertions.Contains(statusSchema.Required, "waiting_for_gate")
-	assertions.Contains(statusSchema.Required, "scheduler_running")
+	assertions.Contains(statusSchema.Required, "scheduled_job_running")
 	assertions.NotContains(statusSchema.Required, "queued_since")
 	requirements.NotNil(statusSchema.Properties["queued_since"])
 	assertions.Equal("date-time", statusSchema.Properties["queued_since"].Format)
@@ -2408,18 +2413,5 @@ func TestSearchAttachmentMetadataSchemaScope(t *testing.T) {
 		}
 		assert.Contains(schemas["HybridSearchItem"].Properties, "attachment_count")
 		assert.Contains(schemas["CLIQueryMessageSummary"].Properties, "attachment_count")
-	}
-}
-
-func TestOpenAPIJobStatusAllowsPostSyncOnlyJobs(t *testing.T) {
-	t.Parallel()
-	requirements := require.New(t)
-	assertions := assert.New(t)
-	for _, build := range []func() *huma.OpenAPI{OpenAPIDocument, openAPIClientDocument} {
-		status := build().Components.Schemas.Map()["JobStatus"]
-		requirements.NotNil(status)
-		requirements.NotNil(status.Properties["next_run"])
-		assertions.NotContains(status.Required, "next_run")
-		assertions.Equal("date-time", status.Properties["next_run"].Format)
 	}
 }

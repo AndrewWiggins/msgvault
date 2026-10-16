@@ -32,7 +32,7 @@ func (e *beforeRequestError) Unwrap() error { return e.err }
 
 func (t beforeRequestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	var err error
-	if jobctx.WorkWindowExpired(request.Context()) {
+	if jobctx.PreemptionRequested(request.Context()) {
 		err = jobctx.ErrRunBudgetExceeded
 	} else if t.before != nil {
 		err = t.before(request.Context())
@@ -43,7 +43,14 @@ func (t beforeRequestTransport) RoundTrip(request *http.Request) (*http.Response
 		}
 		return nil, &beforeRequestError{err: err}
 	}
-	return t.base.RoundTrip(request)
+	done := jobctx.BeginAttempt(request.Context())
+	response, err := t.base.RoundTrip(request)
+	if err != nil {
+		done()
+		return response, err
+	}
+	response.Body = &embeddingMeasuredBody{ReadCloser: response.Body, done: done}
+	return response, nil
 }
 
 func newHTTPClient(timeout time.Duration, rejectRedirects bool) *http.Client {

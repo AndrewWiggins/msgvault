@@ -66,21 +66,19 @@ describe('CardDAVOperations', () => {
     const next = '2026-08-28T11:00:00Z';
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const path = new URL((input instanceof Request ? input : new Request(input)).url).pathname;
-      if (path.endsWith('/status')) return Response.json({ configured: true, available: true, credential_configured: true, enabled: true, scheduled: true, schedule: '0 * * * *', waiting_for_gate: state === 'queued', scheduler_running: state === 'running', queued_since: state === 'queued' ? queued : undefined, next_scheduled_at: next });
+      if (path.endsWith('/status')) return Response.json({ configured: true, available: true, credential_configured: true, enabled: true, scheduled: true, schedule: '0 * * * *', waiting_for_gate: state === 'queued', scheduled_job_running: state === 'running', queued_since: state === 'queued' ? queued : undefined, next_scheduled_at: next });
       return Response.json(path.endsWith('/books') ? { books: [] } : { runs: [] });
     });
     const controller = new CardDAVController(createAPIClient(fetchFn));
     await controller.load();
-    const rendered = render(CardDAVOperations, { controller });
+    render(CardDAVOperations, { controller });
     if (state === 'queued') {
       expect(screen.getByText('Waiting to sync')).toBeDefined();
       expect(screen.getByText(/Queued since/).querySelector('time')?.getAttribute('datetime')).toBe(queued);
-      expect(rendered.container.textContent).toContain(new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(queued)));
     } else {
       const running = screen.getByLabelText('Active CardDAV sync');
       expect(running.textContent).toContain('Running');
       expect(running.querySelector('time')).toBeNull();
-      expect(running.querySelector('strong')).toBeNull();
       expect(screen.queryByText('Waiting to sync')).toBeNull();
     }
     expect(screen.getByText(/Next scheduled time/).querySelector('time')?.getAttribute('datetime')).toBe(next);

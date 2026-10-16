@@ -337,9 +337,7 @@ describe('CardDAVController', () => {
         Object.defineProperty(document, 'hidden', { configurable: true, value: false });
         document.dispatchEvent(new Event('visibilitychange'));
       }
-      await vi.advanceTimersByTimeAsync(mode === 'foreground' ? 9_999 : 499);
-      expect(statusReads).toBe(1);
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(mode === 'foreground' ? 30_000 : 500);
 
       expect(statusReads).toBe(2);
       expect(controller.status?.waiting_for_gate).toBe(true);
@@ -348,16 +346,16 @@ describe('CardDAVController', () => {
     }
   });
 
-  it('polls queued work through scheduler admission and terminal refresh', async () => {
+  it.each(['observed work', 'completed between polls'])('polls queued work through terminal refresh: %s', async (mode) => {
     vi.useFakeTimers();
     let statusReads = 0;
     let bookReads = 0;
     let runReads = 0;
     const queued = { ...idleStatus, waiting_for_gate: true, queued_since: '2026-08-28T10:00:00Z' };
-    const running = { ...idleStatus, scheduler_running: true };
+    const running = { ...idleStatus, scheduled_job_running: true };
     const active = { ...idleStatus, active: run(8) };
     const terminal = { ...idleStatus, latest: run(8, 'succeeded') };
-    const states = [queued, running, active, queued, terminal];
+    const states = mode === 'observed work' ? [queued, running, active, queued, terminal] : [idleStatus, terminal];
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const path = new URL(requestOf(input).url).pathname;
       if (path.endsWith('/status')) return Response.json(states[Math.min(statusReads++, states.length - 1)]);
@@ -375,11 +373,11 @@ describe('CardDAVController', () => {
       expect(controller.status).toEqual(state);
       expect([bookReads, runReads]).toEqual([1, 1]);
     }
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(mode === 'observed work' ? 500 : 30_000);
     expect(controller.status?.latest?.state).toBe('succeeded');
     expect([bookReads, runReads]).toEqual([2, 2]);
     const completedReads = statusReads;
-    await vi.advanceTimersByTimeAsync(9_999);
+    await vi.advanceTimersByTimeAsync(29_999);
     expect(statusReads).toBe(completedReads);
     await vi.advanceTimersByTimeAsync(1);
     expect(statusReads).toBe(completedReads + 1);

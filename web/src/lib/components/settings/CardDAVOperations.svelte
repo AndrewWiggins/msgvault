@@ -137,7 +137,7 @@
             >Started {formatTimestamp(status.active.started_at)}</time
           >
         </div>
-      {:else if status.scheduler_running}
+      {:else if status.scheduled_job_running}
         <div class="run-summary" aria-label="Active CardDAV sync">
           <span class="working"><Spinner size={14} label="CardDAV sync running" /> Running</span>
         </div>

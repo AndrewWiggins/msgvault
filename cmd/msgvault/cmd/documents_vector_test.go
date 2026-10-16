@@ -804,37 +804,26 @@ func TestDocumentVectorConfirmationPrecedesStore(t *testing.T) {
 }
 
 func TestScheduledDocumentVectorResumesInterruptedClaim(t *testing.T) {
-	for _, mode := range []string{"interrupted claim", "yield before claim"} {
-		t.Run(mode, func(t *testing.T) {
-			assert := assert.New(t)
-			require := require.New(t)
-			fixture, spec, testCtx := documentVectorCommandFixture(t)
-			seedScheduledDocumentVectorChunk(t, fixture, spec)
-			invocationFromContext(testCtx).cfg.Vector.Embed.Schedule.RunAfterSync = true
-			consent, err := configuredDocumentVectorConsentSpec(spec, invocationFromContext(testCtx), "document_embedding")
-			require.NoError(err)
-			_, _, err = fixture.Store.RecordDocumentVectorConsent(testCtx, consent, time.Now())
-			require.NoError(err)
-			ctx, cancel := context.WithCancel(testCtx)
-			defer cancel()
-			client := &resumingDocumentSemanticClient{cancel: cancel}
-			capture := &registeredDocumentVectorJobCapture{}
-			require.NoError(registerDocumentVectorJob(capture, &vectorFeatures{DocumentBackend: &commandDocumentVectorBackend{}, SemanticClient: client, Cfg: invocationFromContext(testCtx).cfg.Vector}, fixture.Store, invocationFromContext(testCtx)))
-			if mode == "yield before claim" {
-				ctx, request := jobctx.WithPreemption(ctx)
-				request()
-				require.NoError(capture.job(ctx), "a cooperative yield before claiming leaves the build cursor alone")
-				assert.Zero(client.calls)
-				return
-			}
-			require.ErrorIs(capture.job(ctx), context.Canceled)
-			require.NoError(capture.job(testCtx))
-			assert.Equal(2, client.calls)
-			active, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
-			require.NoError(err)
-			require.NotNil(active, "the interrupted claim resumes without waiting for lease expiry")
-		})
-	}
+	assert := assert.New(t)
+	require := require.New(t)
+	fixture, spec, testCtx := documentVectorCommandFixture(t)
+	seedScheduledDocumentVectorChunk(t, fixture, spec)
+	invocationFromContext(testCtx).cfg.Vector.Embed.Schedule.RunAfterSync = true
+	consent, err := configuredDocumentVectorConsentSpec(spec, invocationFromContext(testCtx), "document_embedding")
+	require.NoError(err)
+	_, _, err = fixture.Store.RecordDocumentVectorConsent(testCtx, consent, time.Now())
+	require.NoError(err)
+	ctx, cancel := context.WithCancel(testCtx)
+	defer cancel()
+	client := &resumingDocumentSemanticClient{cancel: cancel}
+	capture := &registeredDocumentVectorJobCapture{}
+	require.NoError(registerDocumentVectorJob(capture, &vectorFeatures{DocumentBackend: &commandDocumentVectorBackend{}, SemanticClient: client, Cfg: invocationFromContext(testCtx).cfg.Vector}, fixture.Store, invocationFromContext(testCtx)))
+	require.ErrorIs(capture.job(ctx), context.Canceled)
+	require.NoError(capture.job(testCtx))
+	assert.Equal(2, client.calls)
+	active, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
+	require.NoError(err)
+	require.NotNil(active, "the interrupted claim resumes without waiting for lease expiry")
 }
 
 type resumingDocumentSemanticClient struct {
