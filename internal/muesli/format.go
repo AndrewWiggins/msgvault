@@ -162,6 +162,7 @@ type meetingMetadata struct {
 	Folder               string  `json:"folder,omitempty"`
 	CalendarEventID      string  `json:"calendar_event_id,omitempty"`
 	CalendarSource       string  `json:"calendar_source,omitempty"`
+	CalendarSeriesID     string  `json:"calendar_series_id,omitempty"` // Source-local; not an iCal UID.
 	FollowUpToID         int64   `json:"follow_up_to_id,omitzero"`
 	NameOnlyParticipants int     `json:"name_only_participants,omitzero"`
 	Contacts             string  `json:"contacts,omitempty"`
@@ -267,10 +268,10 @@ func (m Meeting) ArchiveSnapshot(sourceID int64, identifier, accountEmail string
 		HasSummary: summary != "", HasNotes: notes != "", HasTranscript: transcript != "",
 		TemplateName: m.TemplateName, Folder: m.Folder,
 		CalendarEventID: m.CalendarEventID, CalendarSource: m.CalendarSource,
-		FollowUpToID: m.FollowUpToID, NameOnlyParticipants: nameOnly,
-		Contacts: contactsState, ContactsResolved: resolved,
-		ContactsCarried: carried, ContactsUnresolved: unresolved,
-		ContactsPhoneSkipped: skippedPhones,
+		CalendarSeriesID: m.CalendarSeriesID, FollowUpToID: m.FollowUpToID,
+		NameOnlyParticipants: nameOnly, Contacts: contactsState,
+		ContactsResolved: resolved, ContactsCarried: carried,
+		ContactsUnresolved: unresolved, ContactsPhoneSkipped: skippedPhones,
 	}, json.Deterministic(true))
 	if err != nil {
 		return meetingarchive.Snapshot{}, fmt.Errorf("marshal Muesli meeting metadata: %w", err)
