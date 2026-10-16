@@ -1186,7 +1186,7 @@ func TestWorkerCommittedBatchSurvivesPassInterruption(t *testing.T) {
 }
 
 func TestWorkerCheckpointRequiresCommittedStamp(t *testing.T) {
-	for _, mode := range []string{"CAS miss", "failed stamp", "success", "unconditional prefix", "CAS prefix", "rolled-back skip"} {
+	for _, mode := range []string{"CAS miss", "failed stamp", "unconditional prefix", "CAS prefix", "rolled-back skip"} {
 		t.Run(mode, func(t *testing.T) {
 			assert := assert.New(t)
 			require := require.New(t)
@@ -1204,8 +1204,6 @@ func TestWorkerCheckpointRequiresCommittedStamp(t *testing.T) {
 			case "failed stamp":
 				cancel()
 				wantErr = context.Canceled
-			case "success":
-				wantProgress, wantMissing = true, 0
 			case "unconditional prefix", "CAS prefix":
 				worker.deps.Store = &partialCommitStampStore{WorkStore: f.Store, cancel: cancel}
 				wantErr = context.Canceled

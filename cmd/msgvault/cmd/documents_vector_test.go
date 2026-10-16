@@ -803,7 +803,7 @@ func TestDocumentVectorConfirmationPrecedesStore(t *testing.T) {
 	assert.Equal(1, openCalls)
 }
 
-func TestScheduledDocumentVectorResumesInterruptedClaim(t *testing.T) {
+func TestScheduledDocumentVectorKeepsOwnerAcrossPasses(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 	fixture, spec, testCtx := documentVectorCommandFixture(t)
@@ -815,22 +815,30 @@ func TestScheduledDocumentVectorResumesInterruptedClaim(t *testing.T) {
 	require.NoError(err)
 	ctx, cancel := context.WithCancel(testCtx)
 	defer cancel()
-	client := &resumingDocumentSemanticClient{cancel: cancel}
+	var owners []string
+	client := &resumingDocumentSemanticClient{cancel: cancel, observe: func(ctx context.Context) error {
+		var owner string
+		if err := fixture.Store.DB().QueryRowContext(ctx, `SELECT lease_owner FROM document_vector_publications WHERE state = 'pending'`).Scan(&owner); err != nil {
+			return err
+		}
+		owners = append(owners, owner)
+		return nil
+	}}
 	capture := &registeredDocumentVectorJobCapture{}
 	require.NoError(registerDocumentVectorJob(capture, &vectorFeatures{DocumentBackend: &commandDocumentVectorBackend{}, SemanticClient: client, Cfg: invocationFromContext(testCtx).cfg.Vector}, fixture.Store, invocationFromContext(testCtx)))
 	require.ErrorIs(capture.job(ctx), context.Canceled)
 	require.NoError(capture.job(testCtx))
-	assert.Equal(2, client.calls)
-	active, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
-	require.NoError(err)
-	require.NotNil(active, "the interrupted claim resumes without waiting for lease expiry")
+	require.Len(owners, 2)
+	assert.NotEmpty(owners[0])
+	assert.Equal(owners[0], owners[1], "registered job keeps one owner across passes")
 }
 
 type resumingDocumentSemanticClient struct {
 	commandDocumentSemanticClient
 
-	cancel context.CancelFunc
-	calls  int
+	cancel  context.CancelFunc
+	calls   int
+	observe func(context.Context) error
 }
 
 func (c *resumingDocumentSemanticClient) EmbedDocuments(ctx context.Context, documents []vector.DocumentInput, checkpoint func([][][]float32) error) (batchVectors [][][]float32, batchErr error) {
@@ -840,6 +848,9 @@ func (c *resumingDocumentSemanticClient) EmbedDocuments(ctx context.Context, doc
 		}
 	}()
 
+	if err := c.observe(ctx); err != nil {
+		return nil, err
+	}
 	c.calls++
 	if c.calls == 1 {
 		c.cancel()

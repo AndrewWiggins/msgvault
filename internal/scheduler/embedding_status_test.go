@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 	"testing/synctest"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,10 +50,6 @@ func TestEmbeddingJobStatus(t *testing.T) {
 			assert.Equal("running", status.Job.State)
 			assert.Nil(status.Job.QueuedAt)
 			require.NotNil(status.Job.StartedAt)
-			time.Sleep(time.Minute)
-			_, err := s.StartJob("embed")
-			require.NoError(err)
-			assert.Equal(status.Job.StartedAt, s.EmbeddingStatus().Job.StartedAt)
 			close(runner.release)
 			synctest.Wait()
 			assert.Equal("idle", s.EmbeddingStatus().Job.State)

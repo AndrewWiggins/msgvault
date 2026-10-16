@@ -89,6 +89,7 @@ func TestAutomaticVectorPassYieldsAndResumes(t *testing.T) {
 		require := require.New(t)
 		var events []string
 		var started, admitted time.Time
+		var attemptErr error
 		syncRuns := 0
 		syncCompleted := false
 		recordWaiter := func(ctx context.Context) error {
@@ -117,7 +118,7 @@ func TestAutomaticVectorPassYieldsAndResumes(t *testing.T) {
 				case <-ctx.Done():
 				}
 				done()
-				require.NoError(ctx.Err(), "a first slow attempt finishes before scheduled cancellation")
+				attemptErr = ctx.Err()
 				events = append(events, "checkpoint")
 				jobctx.RecordProgress(ctx)
 				return nil
@@ -137,6 +138,7 @@ func TestAutomaticVectorPassYieldsAndResumes(t *testing.T) {
 		synctest.Wait()
 		time.Sleep(90*time.Second + 2*yieldPollInterval + 3*time.Minute)
 		synctest.Wait()
+		require.NoError(attemptErr, "a first slow attempt finishes before scheduled cancellation")
 		assert.Equal([]string{"checkpoint", "sync", "complete", "resume"}, events)
 		assert.Equal(1, syncRuns)
 		assert.GreaterOrEqual(admitted.Sub(started), 90*time.Second)
@@ -159,48 +161,4 @@ func TestAutomaticEmbeddingReportsWorkerError(t *testing.T) {
 		assert.Equal(workerErr.Error(), status.LastError)
 		assert.True(status.LastRun.IsZero())
 	})
-}
-
-func TestReservedGenericJobKeepsPolicyOnReplacement(t *testing.T) {
-	for _, change := range []string{"replaced", "removed"} {
-		t.Run(change, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				assert := assert.New(t)
-				require := require.New(t)
-				s := New(nil)
-				defer func() { <-s.Stop().Done() }()
-				var calls []string
-				require.NoError(s.AddJob(Job{Name: "bounded", Schedule: "0 0 1 1 *", Preemptible: true, MaxRuntime: vectorPassBudget, Run: func(ctx context.Context) error {
-					calls = append(calls, "original")
-					deadline, bounded := ctx.Deadline()
-					assert.True(bounded)
-					assert.Equal(vectorPassBudget, time.Until(deadline))
-					return ErrReschedule
-				}}))
-				run, disposition, err := s.reserveGenericJob("bounded", false)
-				require.NoError(err)
-				require.Equal(JobStarted, disposition)
-				if change == "removed" {
-					s.RemoveJob("bounded")
-				} else {
-					require.NoError(s.AddJob(Job{Name: "bounded", Schedule: "0 0 1 1 *", MaxRuntime: 30 * time.Second, Run: func(ctx context.Context) error {
-						calls = append(calls, "replacement")
-						deadline, bounded := ctx.Deadline()
-						assert.True(bounded)
-						assert.Equal(30*time.Second, time.Until(deadline))
-						return nil
-					}}))
-				}
-
-				require.NoError(s.runJob("bounded", run))
-				synctest.Wait()
-				if change == "removed" {
-					assert.Equal([]string{"original"}, calls)
-					assert.Empty(s.JobStatus())
-				} else {
-					assert.Equal([]string{"original", "replacement"}, calls)
-				}
-			})
-		})
-	}
 }

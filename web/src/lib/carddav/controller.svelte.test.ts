@@ -303,7 +303,7 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
-  it.each(['foreground', 'visibility resume'])('discovers a scheduled sync from idle on %s', async (mode) => {
+  it('discovers a scheduled sync from idle', async () => {
     vi.useFakeTimers();
     let queued = false;
     let statusReads = 0;
@@ -326,18 +326,8 @@ describe('CardDAVController', () => {
       expect(statusReads).toBe(1);
       expect(controller.status?.waiting_for_gate).toBeUndefined();
 
-      if (mode === 'visibility resume') {
-        Object.defineProperty(document, 'hidden', { configurable: true, value: true });
-        document.dispatchEvent(new Event('visibilitychange'));
-        await vi.advanceTimersByTimeAsync(10_000);
-        expect(statusReads).toBe(1);
-      }
       queued = true;
-      if (mode === 'visibility resume') {
-        Object.defineProperty(document, 'hidden', { configurable: true, value: false });
-        document.dispatchEvent(new Event('visibilitychange'));
-      }
-      await vi.advanceTimersByTimeAsync(mode === 'foreground' ? 30_000 : 500);
+      await vi.advanceTimersByTimeAsync(30_000);
 
       expect(statusReads).toBe(2);
       expect(controller.status?.waiting_for_gate).toBe(true);

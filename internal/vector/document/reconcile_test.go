@@ -241,7 +241,7 @@ func TestReconcilerRunReplaysParkedPageAfterBackendDeleteFailure(t *testing.T) {
 	assertions.Equal([][]string{{ledger.obsolete[0].Token}, {ledger.obsolete[0].Token}}, backend.deletes)
 }
 
-func TestReconcilerRunRetainsPartialFinalizeFailureOnCancellation(t *testing.T) {
+func TestReconcilerRunRetriesUnfinalizedCleanupAfterCancellation(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	ctx, cancel := context.WithCancelCause(jobctx.WithProgress(t.Context()))
@@ -266,7 +266,7 @@ func TestReconcilerRunRetainsPartialFinalizeFailureOnCancellation(t *testing.T) 
 
 	first, err := reconciler.Run(ctx, 1, 2)
 	requirements.ErrorIs(err, context.Canceled)
-	requirements.ErrorIs(jobctx.ErrorAfterYield(ctx, err), finalizeErr)
+	requirements.ErrorIs(err, finalizeErr)
 	assertions.Equal(1, first.CleanupFinalized)
 	assertions.True(jobctx.HasProgress(ctx))
 	assertions.Zero(first.CleanupAfterGenerationID)

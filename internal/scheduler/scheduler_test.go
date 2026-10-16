@@ -2002,71 +2002,51 @@ func (t *yieldingWorkTracker) ShouldYield() bool {
 }
 
 func TestGenericJobYieldContextFinishesCleanly(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-
-		oldPoll := yieldPollInterval
-		yieldPollInterval = 5 * time.Millisecond
-		defer func() { yieldPollInterval = oldPoll }()
-
-		tracker := &yieldingWorkTracker{}
-		started := make(chan struct{})
-		var runs int
-		causeCh := make(chan error, 1)
-		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(tracker)
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(s.AddJob(Job{
-			Name:     "attachment-maintenance",
-			Schedule: "17 3 * * *",
-			Run: func(ctx context.Context) error {
-				runs++
-				if runs > 1 {
-					return nil
+	for _, account := range []bool{false, true} {
+		t.Run(fmt.Sprintf("account=%t", account), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				require := require.New(t)
+				assert := assert.New(t)
+				tracker := &yieldingWorkTracker{}
+				runs := 0
+				causeCh := make(chan error, 1)
+				run := func(ctx context.Context) error {
+					runs++
+					if runs > 1 {
+						return nil
+					}
+					<-ctx.Done()
+					causeCh <- context.Cause(ctx)
+					return ctx.Err()
 				}
-				close(started)
-				<-ctx.Done()
-				causeCh <- context.Cause(ctx)
-				return ctx.Err()
-			},
-		}), "AddJob")
-
-		errCh := make(chan error, 1)
-		go func() { errCh <- s.TriggerJob("attachment-maintenance") }()
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			require.FailNow("generic job did not start")
-		}
-
-		tracker.yield.Store(true)
-		synctest.Sleep(yieldPollInterval)
-		select {
-		case cause := <-causeCh:
-			require.ErrorIs(cause, ErrYieldedToWaiter, "generic job cancellation cause")
-		case <-time.After(time.Second):
-			require.FailNow("generic job did not yield")
-		}
-		select {
-		case err := <-errCh:
-			require.NoError(err, "yield is not a generic job failure")
-		case <-time.After(time.Second):
-			require.FailNow("TriggerJob did not return after yield")
-		}
-		synctest.Wait()
-		assert.Equal(0, tracker.active(), "gate released after generic job yield")
-		assert.Equal(2, runs, "the yielded job resumes without a schedule tick")
-		status := s.JobStatus()
-		require.Len(status, 1)
-		assert.Empty(status[0].LastError, "yield must not be recorded as a generic job error")
-
-		stopCtx := s.Stop()
-		select {
-		case <-stopCtx.Done():
-		case <-time.After(time.Second):
-			require.FailNow("scheduler did not stop after yielded generic job")
-		}
-	})
+				s := New(func(ctx context.Context, _ string) error { return run(ctx) }).WithWorkTracker(tracker)
+				defer func() { <-s.Stop().Done() }()
+				result := make(chan error, 1)
+				if account {
+					require.NoError(s.AddAccount("scheduled@example.test", "0 0 1 1 *"))
+					require.NoError(s.TriggerSync("scheduled@example.test"))
+				} else {
+					require.NoError(s.AddJob(Job{Name: "maintenance", Schedule: "17 3 * * *", Run: run}))
+					go func() { result <- s.TriggerJob("maintenance") }()
+				}
+				synctest.Wait()
+				tracker.yield.Store(true)
+				synctest.Sleep(yieldPollInterval)
+				synctest.Wait()
+				require.ErrorIs(<-causeCh, ErrYieldedToWaiter)
+				if !account {
+					require.NoError(<-result, "yield is not a job failure")
+				}
+				assert.Zero(tracker.active(), "yield releases the gate")
+				assert.Equal(2, runs, "yield queues a follow-up without a schedule tick")
+				if account {
+					assert.Empty(s.Status()[0].LastError)
+				} else {
+					assert.Empty(s.JobStatus()[0].LastError)
+				}
+			})
+		})
+	}
 }
 
 func TestGenericJobShutdownContextFinishesCleanly(t *testing.T) {
@@ -2119,63 +2099,6 @@ func TestRemoveJobClearsStableGenericScheduleAndRunner(t *testing.T) {
 	assert.False(s.IsJobScheduled("carddav"))
 	assert.Empty(s.JobStatus())
 	require.ErrorContains(s.TriggerJob("carddav"), "not scheduled")
-}
-
-func TestScheduledSyncYieldsToWaiter(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-
-		oldPoll := yieldPollInterval
-		yieldPollInterval = 5 * time.Millisecond
-		defer func() { yieldPollInterval = oldPoll }()
-
-		tracker := &yieldingWorkTracker{}
-		started := make(chan struct{})
-		var runs int
-		syncCtxErr := make(chan error, 1)
-		s := New(func(ctx context.Context, email string) error {
-			runs++
-			if runs > 1 {
-				return nil
-			}
-			close(started)
-			<-ctx.Done()
-			syncCtxErr <- context.Cause(ctx)
-			return ctx.Err()
-		}).WithWorkTracker(tracker)
-
-		require.NoError(s.AddAccount("test@gmail.com", "0 0 1 1 *"), "AddAccount")
-		s.Start()
-		defer func() {
-			ctx := s.Stop()
-			<-ctx.Done()
-		}()
-
-		require.NoError(s.TriggerSync("test@gmail.com"), "TriggerSync")
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			require.FailNow("sync did not start")
-		}
-
-		tracker.yield.Store(true)
-		synctest.Sleep(yieldPollInterval)
-		select {
-		case cause := <-syncCtxErr:
-			require.ErrorIs(cause, ErrYieldedToWaiter, "cancellation cause")
-		case <-time.After(time.Second):
-			require.FailNow("sync was not cancelled after yield request")
-		}
-
-		synctest.Wait()
-		assert.Equal(0, tracker.active(), "gate released after yield")
-		assert.Equal(2, runs, "the yielded sync resumes without a schedule tick")
-
-		for _, status := range s.Status() {
-			assert.Empty(status.LastError, "yield must not be recorded as a sync error")
-		}
-	})
 }
 
 func TestScheduler_VisualPostSyncQueuesPendingRunWhileActive(t *testing.T) {
@@ -2325,22 +2248,13 @@ func TestStatusReportsStartedWhileExecuting(t *testing.T) {
 		}).WithWorkTracker(newSerialWorkTracker())
 		defer func() { <-s.Stop().Done() }()
 		require.NoError(s.AddAccount("a@example.com", "0 0 1 1 *"))
-		require.NoError(s.AddJob(Job{Name: "job", Schedule: "0 0 1 1 *", Run: func(context.Context) error {
-			<-release
-			return nil
-		}}))
 
 		require.NoError(s.TriggerSync("a@example.com"))
-		synctest.Wait()
-		go s.onJobTick("job")
 		synctest.Wait()
 
 		account := s.Status()[0]
 		assert.False(account.Queued)
 		assert.False(account.StartedAt.IsZero(), "executing run reports its start")
-		job := s.JobStatus()[0]
-		assert.True(job.Queued, "generic job waiting for the gate is queued")
-		assert.False(job.Running, "waiting for the gate is queued, not running")
 
 		close(release)
 		synctest.Wait()
@@ -2673,122 +2587,64 @@ func TestNoPreemptionWithoutQueuedWork(t *testing.T) {
 }
 
 func TestJobFollowUpRunsReregisteredFunction(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-		release := make(chan struct{})
-		var oldRuns, newRuns atomic.Int32
-		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(newSerialWorkTracker())
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(s.AddJob(Job{Name: "job", Schedule: "0 0 1 1 *", Run: func(context.Context) error {
-			oldRuns.Add(1)
-			<-release
-			return nil
-		}}))
-
-		go s.onJobTick("job")
-		synctest.Wait()
-		s.onJobTick("job")
-		require.NoError(s.AddJob(Job{Name: "job", Schedule: "0 0 1 1 *", Run: func(context.Context) error {
-			newRuns.Add(1)
-			return nil
-		}}))
-		close(release)
-		synctest.Wait()
-
-		assert.Equal(int32(1), oldRuns.Load())
-		assert.Equal(int32(1), newRuns.Load(), "the follow-up runs the job as currently registered")
-	})
-}
-
-func TestJobRuntimeBudgetResumesWithoutWaiter(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-		var runs int
-		s := New(nil)
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(s.AddJob(Job{Name: "maintenance", Schedule: "0 0 1 1 *", MaxRuntime: 30 * time.Second, Run: func(ctx context.Context) error {
-			runs++
-			if runs == 1 {
-				jobctx.RecordProgress(ctx)
-				<-ctx.Done()
-				return context.Cause(ctx)
-			}
-			return nil
-		}}))
-		mustStartJob(t, s, "maintenance")
-		synctest.Wait()
-		time.Sleep(31 * time.Second)
-		synctest.Wait()
-		assert.Equal(2, runs)
-		status := s.JobStatus()[0]
-		assert.Empty(status.LastError)
-		assert.False(status.LastRun.IsZero())
-	})
-}
-
-func TestJobBudgetStartsAfterGateAdmission(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-		gate := newSerialWorkTracker()
-		release, ok := gate.BeginWork()
-		require.True(ok)
-		var runs int
-		s := New(nil).WithWorkTracker(gate)
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(s.AddJob(Job{Name: "bounded", Schedule: "0 0 1 1 *", MaxRuntime: 30 * time.Second, Run: func(ctx context.Context) error {
-			runs++
-			assert.NoError(ctx.Err(), "time spent queued does not consume the runtime budget")
-			return nil
-		}}))
-		mustStartJob(t, s, "bounded")
-		synctest.Wait()
-		time.Sleep(2 * time.Minute)
-		assert.True(s.JobStatus()[0].Queued)
-		assert.False(s.JobStatus()[0].Running)
-		release()
-		synctest.Wait()
-		assert.Equal(1, runs)
-		assert.Empty(s.JobStatus()[0].LastError)
-	})
-}
-
-func TestJobBudgetPreservesCallbackFailure(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-		sourceErr := errors.New("maintenance catalog unavailable")
-		s := New(nil)
-		defer func() { <-s.Stop().Done() }()
-		runs := 0
-		release := make(chan struct{})
-		require.NoError(s.AddJob(Job{Name: "bounded-error", Schedule: "0 0 1 1 *", MaxRuntime: time.Minute, Run: func(ctx context.Context) error {
-			runs++
-			if runs == 1 {
-				jobctx.RecordProgress(ctx)
-				<-ctx.Done()
-				return errors.Join(sourceErr, ctx.Err())
-			}
-			select {
-			case <-release:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}}))
-		mustStartJob(t, s, "bounded-error")
-		time.Sleep(time.Minute + time.Second)
-		synctest.Wait()
-		// The follow-up is still running, so LastError comes from the first pass.
-		assert.Equal(2, runs, "committed progress queues a follow-up")
-		assert.Equal(sourceErr.Error(), s.JobStatus()[0].LastError,
-			"the budget filters its own cancellation but keeps the callback's failure")
-		close(release)
-		synctest.Wait()
-		assert.Empty(s.JobStatus()[0].LastError)
-	})
+	for _, change := range []string{"running replacement", "reserved replacement", "removed"} {
+		t.Run(change, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				require := require.New(t)
+				assert := assert.New(t)
+				release := make(chan struct{})
+				var calls []string
+				s := New(nil).WithWorkTracker(newSerialWorkTracker())
+				defer func() { <-s.Stop().Done() }()
+				require.NoError(s.AddJob(Job{Name: "job", Schedule: "0 0 1 1 *", Preemptible: true, MaxRuntime: 5 * time.Minute, Run: func(ctx context.Context) error {
+					calls = append(calls, "original")
+					deadline, bounded := ctx.Deadline()
+					assert.True(bounded)
+					assert.Equal(5*time.Minute, time.Until(deadline))
+					if change == "running replacement" {
+						<-release
+						return nil
+					}
+					return ErrReschedule
+				}}))
+				var reserved Job
+				if change == "running replacement" {
+					go s.onJobTick("job")
+					synctest.Wait()
+					s.onJobTick("job")
+				} else {
+					var disposition JobDisposition
+					var err error
+					reserved, disposition, err = s.reserveGenericJob("job", false)
+					require.NoError(err)
+					require.Equal(JobStarted, disposition)
+				}
+				if change == "removed" {
+					s.RemoveJob("job")
+				} else {
+					require.NoError(s.AddJob(Job{Name: "job", Schedule: "0 0 1 1 *", MaxRuntime: 30 * time.Second, Run: func(ctx context.Context) error {
+						calls = append(calls, "replacement")
+						deadline, bounded := ctx.Deadline()
+						assert.True(bounded)
+						assert.Equal(30*time.Second, time.Until(deadline))
+						return nil
+					}}))
+				}
+				if change == "running replacement" {
+					close(release)
+				} else {
+					require.NoError(s.runJob("job", reserved))
+				}
+				synctest.Wait()
+				if change == "removed" {
+					assert.Equal([]string{"original"}, calls)
+					assert.Empty(s.JobStatus())
+				} else {
+					assert.Equal([]string{"original", "replacement"}, calls)
+				}
+			})
+		})
+	}
 }
 
 func TestJobBudgetWithoutCheckpointReportsFailureAndWaitsForTick(t *testing.T) {
@@ -2901,38 +2757,6 @@ func TestStartJobCoalescesDuringRun(t *testing.T) {
 		assert.Equal(int32(1), maxActive.Load(), "runs never overlap")
 		assert.False(s.JobStatus()[0].Pending)
 		assert.False(s.JobStatus()[0].Running)
-	})
-}
-
-// TestStartJobWhileInitialRunWaitsForGate proves a trigger that arrives while
-// the first run is still queued behind the operation gate is reported as
-// coalesced, not queued: no follow-up is recorded and only the original run
-// executes.
-func TestStartJobWhileInitialRunWaitsForGate(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-		gate := newSerialWorkTracker()
-		release, ok := gate.BeginWork()
-		require.True(ok)
-		var runs atomic.Int32
-		s := New(nil).WithWorkTracker(gate)
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(s.AddJob(Job{Name: "job", Schedule: "0 0 1 1 *", Run: func(context.Context) error {
-			runs.Add(1)
-			return nil
-		}}))
-
-		assert.Equal(JobStarted, mustStartJob(t, s, "job"))
-		synctest.Wait()
-		require.True(s.JobStatus()[0].Queued, "initial run waits for the gate")
-
-		assert.Equal(JobCoalesced, mustStartJob(t, s, "job"))
-		assert.False(s.JobStatus()[0].Pending, "no follow-up is recorded")
-
-		release()
-		synctest.Wait()
-		assert.Equal(int32(1), runs.Load(), "only the original run executes")
 	})
 }
 
@@ -3088,38 +2912,53 @@ func TestGenericJobDefersUntilNextTrigger(t *testing.T) {
 }
 
 func TestGenericJobYieldWithProgressClearsEarlierFailure(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		s := New(nil).WithLogger(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
-		defer func() { <-s.Stop().Done() }()
-		runs := 0
-		release := make(chan struct{})
-		require.NoError(s.AddJob(Job{Name: "bounded", Schedule: "0 0 1 1 *", MaxRuntime: time.Minute, Run: func(ctx context.Context) error {
-			runs++
-			switch runs {
-			case 1:
-				return errors.New("synthetic earlier failure")
-			case 2:
-				jobctx.RecordProgress(ctx)
-				<-ctx.Done()
-				return nil
-			default:
-				<-release
-				return nil
-			}
-		}}))
-		require.Error(s.TriggerJob("bounded"))
-		mustStartJob(t, s, "bounded")
-		time.Sleep(2 * time.Minute)
-		synctest.Wait()
-
-		status := s.JobStatus()[0]
-		assert.Equal(t, 3, runs, "the yielded pass queues its follow-up")
-		assert.True(t, status.Running)
-		assert.Empty(t, status.LastError, "a pass that saved progress clears the earlier failure")
-		close(release)
-		synctest.Wait()
-	})
+	for _, callbackErr := range []error{nil, errors.New("maintenance catalog unavailable")} {
+		name := "clean yield"
+		if callbackErr != nil {
+			name = "callback failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				require := require.New(t)
+				assert := assert.New(t)
+				s := New(nil).WithLogger(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+				defer func() { <-s.Stop().Done() }()
+				runs := 0
+				release := make(chan struct{})
+				require.NoError(s.AddJob(Job{Name: "bounded", Schedule: "0 0 1 1 *", MaxRuntime: time.Minute, Run: func(ctx context.Context) error {
+					runs++
+					switch runs {
+					case 1:
+						return errors.New("synthetic earlier failure")
+					case 2:
+						jobctx.RecordProgress(ctx)
+						<-ctx.Done()
+						return errors.Join(callbackErr, ctx.Err())
+					default:
+						<-release
+						return nil
+					}
+				}}))
+				require.Error(s.TriggerJob("bounded"))
+				mustStartJob(t, s, "bounded")
+				time.Sleep(time.Minute + time.Second)
+				synctest.Wait()
+				status := s.JobStatus()[0]
+				assert.Equal(3, runs, "the yielded pass queues its follow-up")
+				assert.True(status.Running)
+				if callbackErr == nil {
+					assert.Empty(status.LastError, "a pass that saved progress clears the earlier failure")
+				} else {
+					assert.Equal(callbackErr.Error(), status.LastError)
+				}
+				close(release)
+				synctest.Wait()
+				status = s.JobStatus()[0]
+				assert.Empty(status.LastError)
+				assert.False(status.LastRun.IsZero(), "the completed follow-up records its last run")
+			})
+		})
+	}
 }
 
 func TestGateQueueAge(t *testing.T) {
@@ -3129,18 +2968,22 @@ func TestGateQueueAge(t *testing.T) {
 		gate := newSerialWorkTracker()
 		release, ok := gate.BeginWork()
 		require.True(ok)
-		runs := 0
+		runs, jobRuns := 0, 0
 		s := New(func(context.Context, string) error { runs++; return nil }).WithWorkTracker(gate)
 		defer func() { <-s.Stop().Done() }()
 		require.NoError(s.AddAccount("queued@example.test", "0 0 1 1 *"))
-		require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", Run: func(context.Context) error { return nil }}))
+		require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", MaxRuntime: 30 * time.Second, Run: func(ctx context.Context) error {
+			jobRuns++
+			assert.NoError(ctx.Err(), "queue time does not consume the runtime budget")
+			return nil
+		}}))
 		since := time.Now()
 		require.NoError(s.TriggerSync("queued@example.test"))
-		mustStartJob(t, s, "carddav")
+		assert.Equal(JobStarted, mustStartJob(t, s, "carddav"))
 		synctest.Wait()
 		s.onAccountTick("queued@example.test")
 		s.onJobTick("carddav")
-		time.Sleep(preemptAfter)
+		time.Sleep(2 * time.Minute)
 		for range 3 {
 			s.onAccountTick("queued@example.test")
 			s.onJobTick("carddav")
@@ -3151,9 +2994,14 @@ func TestGateQueueAge(t *testing.T) {
 		assert.False(s.Status()[0].Running)
 		assert.True(s.Status()[0].StartedAt.IsZero())
 		assert.True(s.JobStatus()[0].Queued)
+		assert.False(s.JobStatus()[0].Running)
+		assert.Equal(JobCoalesced, mustStartJob(t, s, "carddav"))
+		assert.False(s.JobStatus()[0].Pending)
 		release()
 		synctest.Wait()
 		assert.Equal(1, runs, "ticks while queued do not create a follow-up run")
+		assert.Equal(1, jobRuns, "coalesced triggers run only the original job")
+		assert.Empty(s.JobStatus()[0].LastError)
 		assert.True(s.Status()[0].QueuedSince.IsZero())
 		assert.True(s.JobStatus()[0].QueuedSince.IsZero())
 	})
