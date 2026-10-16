@@ -43,6 +43,9 @@ func TestEmbedJobRunHandlesInterruptedPhases(t *testing.T) {
 		{"interrupted RunOnce", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Worker = &fakeRunner{runErr: failure, yieldCancel: interrupt}
 		}, true, 1, 0, 0, nil, false},
+		{"clean RunOnce yield", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
+			job.Worker = &fakeRunner{yieldCancel: interrupt}
+		}, false, 1, 0, 0, nil, false},
 		{"target building lookup", func(job *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Fingerprint = ""
 			backend.buildErr, backend.yieldBuilding = failure, interrupt

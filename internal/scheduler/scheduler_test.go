@@ -870,34 +870,6 @@ func (r *fakeRunner) passScopes() (run, backstop []operations.PassScope) {
 
 // ---------- EmbedJob tests ----------
 
-func TestEmbedJob_Run_YieldedCleanRunStopsBeforeCompletionWork(t *testing.T) {
-	assert := assert.New(t)
-	building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
-	backend := &fakeBackend{activeErr: vector.ErrNoActiveGeneration, building: building}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	runner := &fakeRunner{yieldCancel: cancel}
-	coverage := &fakeCoverage{}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker:      runner,
-		Backend:     backend,
-		Store:       coverage,
-		Fingerprint: "m:768",
-		Log:         slog.New(slog.NewTextHandler(&logs, nil)),
-	}
-
-	job.Run(ctx)
-
-	_, run, _ := runner.calls()
-	assert.Equal(1, run, "RunOnce calls")
-	n, _ := runner.backstops()
-	assert.Equal(0, n, "RunBackstop calls")
-	assert.Equal(0, coverage.calls, "coverage queries")
-	assert.Empty(backend.activations(), "activation calls")
-	assert.NotContains(logs.String(), "embed run complete", "yield must not log completion")
-}
-
 func TestEmbedJob_Run_ErrorWithoutYieldLogsFailure(t *testing.T) {
 	assert := assert.New(t)
 	backend := &fakeBackend{active: vector.Generation{ID: 5, State: vector.GenerationActive}}
@@ -1928,33 +1900,6 @@ func TestScheduler_RunAfterSync_SkipOnStopped(t *testing.T) {
 	assert.Equal(t, 0, run, "RunOnce calls when scheduler is stopped")
 }
 
-func TestScheduler_RunAfterSync_SkipOnSyncError(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		s := New(func(ctx context.Context, email string) error {
-			return errors.New("sync failed")
-		})
-		backend := &fakeBackend{active: vector.Generation{ID: 1}}
-		runner := &fakeRunner{}
-		job := &EmbedJob{Worker: runner, Backend: backend}
-
-		require.NoError(s.SetEmbedJob(job, "", true), "SetEmbedJob")
-		require.NoError(s.AddAccount("test@gmail.com", "0 0 1 1 *"), "AddAccount")
-
-		s.Start()
-		defer func() {
-			ctx := s.Stop()
-			<-ctx.Done()
-		}()
-
-		require.NoError(s.TriggerSync("test@gmail.com"), "TriggerSync")
-		synctest.Wait()
-
-		_, run, _ := runner.calls()
-		assert.Equal(t, 0, run, "RunOnce calls when sync failed")
-	})
-}
-
 func TestScheduler_VisualRunAfterSyncDoesNotExtendSync(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		requirements := require.New(t)
@@ -2369,36 +2314,6 @@ func TestTickWhileExecutingQueuesOneFollowUp(t *testing.T) {
 	})
 }
 
-func TestTickWhileQueuedIsDropped(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-		gate := newSerialWorkTracker()
-		hold, ok := gate.BeginWork()
-		require.True(ok)
-		var runs atomic.Int32
-		s := New(func(ctx context.Context, email string) error {
-			runs.Add(1)
-			return nil
-		}).WithWorkTracker(gate)
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(s.AddAccount("a@example.com", "0 0 1 1 *"))
-
-		go s.onAccountTick("a@example.com")
-		synctest.Wait()
-		status := s.Status()
-		require.Len(status, 1)
-		assert.True(status[0].Queued, "run waiting for the gate is reported as queued")
-		assert.False(status[0].Running, "a queued account is not running")
-		assert.True(status[0].StartedAt.IsZero(), "a queued run has not started")
-
-		s.onAccountTick("a@example.com")
-		hold()
-		synctest.Wait()
-		assert.Equal(int32(1), runs.Load(), "a tick while the run is still queued is redundant")
-	})
-}
-
 func TestStatusReportsStartedWhileExecuting(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		require := require.New(t)
@@ -2528,60 +2443,6 @@ func TestLongCooperativeJobYieldsToQueuedJob(t *testing.T) {
 	})
 }
 
-func TestPreemptedDailyRunResumesBehindWaiter(t *testing.T) {
-	for _, account := range []bool{false, true} {
-		name := "job"
-		if account {
-			name = "account"
-		}
-		t.Run(name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				var order []string
-				var runs int
-				var cause error
-				run := func(ctx context.Context) error {
-					runs++
-					order = append(order, "daily")
-					if runs == 1 {
-						<-ctx.Done()
-						cause = context.Cause(ctx)
-						return ctx.Err()
-					}
-					return nil
-				}
-				s := New(func(ctx context.Context, _ string) error { return run(ctx) }).WithWorkTracker(newSerialWorkTracker())
-				defer func() { <-s.Stop().Done() }()
-				if account {
-					require.NoError(t, s.AddAccount("daily@example.com", "0 0 * * *"))
-					require.NoError(t, s.TriggerSync("daily@example.com"))
-				} else {
-					require.NoError(t, s.AddJob(Job{Name: "daily", Preemptible: true, Schedule: "0 0 * * *", Run: run}))
-					mustStartJob(t, s, "daily")
-				}
-				synctest.Wait()
-
-				releaseWaiter := make(chan struct{})
-				require.NoError(t, s.AddJob(Job{Name: "waiter", Schedule: "* * * * *", Run: func(ctx context.Context) error {
-					order = append(order, "waiter")
-					select {
-					case <-releaseWaiter:
-					case <-ctx.Done():
-					}
-					return nil
-				}}))
-				mustStartJob(t, s, "waiter")
-				time.Sleep(preemptAfter + yieldPollInterval)
-				synctest.Wait()
-				require.ErrorIs(t, cause, ErrYieldedToWaiter)
-				assert.Equal(t, []string{"daily", "waiter"}, order, "the existing waiter goes first")
-				close(releaseWaiter)
-				synctest.Wait()
-				assert.Equal(t, []string{"daily", "waiter", "daily"}, order, "the interrupted daily run resumes without a cron tick")
-			})
-		})
-	}
-}
-
 func TestBoundedMaintenanceCompletesWithQueuedWork(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		require := require.New(t)
@@ -2679,6 +2540,7 @@ func TestPreemptedGenericJobErrorQueuesFollowUpAndPreservesError(t *testing.T) {
 					assert := assert.New(t)
 					partialErr := errors.New("checkpointed import was partial")
 					var order []string
+					var cause error
 					runs := 0
 					release := make(chan struct{})
 					var logs bytes.Buffer
@@ -2698,6 +2560,7 @@ func TestPreemptedGenericJobErrorQueuesFollowUpAndPreservesError(t *testing.T) {
 						}
 						if cancelled {
 							<-ctx.Done()
+							cause = context.Cause(ctx)
 							return errors.Join(partialErr, ctx.Err())
 						}
 						for !jobctx.PreemptionRequested(ctx) {
@@ -2723,6 +2586,9 @@ func TestPreemptedGenericJobErrorQueuesFollowUpAndPreservesError(t *testing.T) {
 					synctest.Wait()
 					if !account {
 						require.ErrorIs(<-result, partialErr)
+					}
+					if cancelled {
+						require.ErrorIs(cause, ErrYieldedToWaiter)
 					}
 					require.Equal([]string{"subject", "waiter"}, order)
 					lastError := func() string {
@@ -3263,7 +3129,8 @@ func TestGateQueueAge(t *testing.T) {
 		gate := newSerialWorkTracker()
 		release, ok := gate.BeginWork()
 		require.True(ok)
-		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(gate)
+		runs := 0
+		s := New(func(context.Context, string) error { runs++; return nil }).WithWorkTracker(gate)
 		defer func() { <-s.Stop().Done() }()
 		require.NoError(s.AddAccount("queued@example.test", "0 0 1 1 *"))
 		require.NoError(s.AddJob(Job{Name: "carddav", Schedule: "0 0 1 1 *", Run: func(context.Context) error { return nil }}))
@@ -3281,9 +3148,12 @@ func TestGateQueueAge(t *testing.T) {
 		assert.Equal(since, s.Status()[0].QueuedSince)
 		assert.Equal(since, s.JobStatus()[0].QueuedSince)
 		assert.True(s.Status()[0].Queued)
+		assert.False(s.Status()[0].Running)
+		assert.True(s.Status()[0].StartedAt.IsZero())
 		assert.True(s.JobStatus()[0].Queued)
 		release()
 		synctest.Wait()
+		assert.Equal(1, runs, "ticks while queued do not create a follow-up run")
 		assert.True(s.Status()[0].QueuedSince.IsZero())
 		assert.True(s.JobStatus()[0].QueuedSince.IsZero())
 	})

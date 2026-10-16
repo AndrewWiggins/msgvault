@@ -822,7 +822,10 @@ func TestScheduledVectorPassRejectsRetryAfterYield(t *testing.T) {
 					}
 					if provider == "voyage" {
 						voyage := NewVoyageClient(VoyageConfig{Endpoint: "http://example.com", Model: "synthetic", Dimension: 4, Timeout: requestTimeout, MaxRetries: 2})
-						voyage.http.Transport = beforeRequestTransport{base: server.Client().Transport}
+						transport, ok := voyage.http.Transport.(beforeRequestTransport)
+						require.True(ok, "NewVoyageClient installs the production request gate")
+						transport.base = server.Client().Transport
+						voyage.http.Transport = transport
 						run = func(ctx context.Context) error { _, err := voyage.EmbedQuery(ctx, "synthetic input"); return err }
 					}
 					if preempt {
