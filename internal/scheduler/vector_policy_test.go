@@ -215,31 +215,3 @@ func TestReservedGenericJobKeepsPolicyOnReplacement(t *testing.T) {
 		})
 	}
 }
-
-func TestAutomaticVectorPeersStopWithoutProgress(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		assert := assert.New(t)
-		s := New(nil).WithWorkTracker(newSerialWorkTracker())
-		defer func() { <-s.Stop().Done() }()
-		calls := map[string]int{}
-		for _, name := range []string{"embed", "document-vector"} {
-			registerPolicyVectorJob(t, s, name, func(ctx context.Context) error {
-				calls[name]++
-				<-ctx.Done()
-				return ctx.Err()
-			})
-		}
-		mustStartJob(t, s, "embed")
-		synctest.Wait()
-		mustStartJob(t, s, "document-vector")
-		synctest.Wait()
-		time.Sleep(2 * (vectorPassBudget + 30*time.Second + 5*time.Second))
-		synctest.Wait()
-		for _, status := range s.JobStatus() {
-			assert.Equal(1, calls[status.Name])
-			assert.Contains(status.LastError, "runtime budget exceeded before committing progress")
-			assert.False(status.Pending)
-			assert.False(status.Running)
-		}
-	})
-}

@@ -1136,6 +1136,7 @@ func TestWorkerCommittedBatchSurvivesPassInterruption(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(jobctx.WithProgress(t.Context()))
 			defer cancel(nil)
 			worker := newTestWorker(f, 2)
+			worker.deps.MaxConsecutiveFailures = 1
 			calls := 0
 			if cause == nil {
 				var request context.CancelFunc
@@ -1149,21 +1150,34 @@ func TestWorkerCommittedBatchSurvivesPassInterruption(t *testing.T) {
 					}
 					return vectors, nil
 				}
+			} else if errors.Is(cause, jobctx.ErrRunBudgetExceeded) {
+				f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
+					calls++
+					if calls == 2 {
+						return nil, cause
+					}
+					return [][]float32{{1, 0, 0, 0}, {1, 0, 0, 0}}, nil
+				}
 			} else {
 				worker.deps.Client = &checkpointInterruptClient{EmbeddingClient: f.FakeClient, cancel: cancel, cause: cause}
 			}
-			_, err := worker.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
+			result, err := worker.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
 			if cause == nil {
 				require.NoError(err)
 				require.NoError(ctx.Err())
 				assert.Equal(1, calls)
+			} else if errors.Is(cause, jobctx.ErrRunBudgetExceeded) {
+				require.ErrorIs(err, cause)
+				require.NoError(ctx.Err())
+				assert.Equal(2, result.Succeeded)
+				assert.Zero(result.Failed, "a denied request leaves its messages unfinished")
 			} else {
 				require.ErrorIs(context.Cause(ctx), cause)
 			}
 			assert.True(jobctx.HasProgress(ctx))
 			assert.Equal(3, countMissing(t, f.MainDB, int64(f.BuildingGen)), "the first batch remains committed")
 			f.FakeClient.OnEmbed = nil
-			result, err := newTestWorker(f, 2).RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+			result, err = newTestWorker(f, 2).RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
 			require.NoError(err)
 			assert.Equal(3, result.Succeeded, "a resumed scan embeds only remaining messages")
 			assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)))

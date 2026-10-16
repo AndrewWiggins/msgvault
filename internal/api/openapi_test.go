@@ -70,21 +70,15 @@ func TestQueuedWorkOpenAPIFields(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 	for _, doc := range []*huma.OpenAPI{OpenAPIDocument(), openAPIClientDocument()} {
-		for schemaName, fields := range map[string][]string{
-			"AccountStatus": {"queued_since"},
-			"JobStatus":     {"queued_since"},
-		} {
-			schema := doc.Components.Schemas.Map()[schemaName]
-			require.NotNil(schema, schemaName)
-			for _, field := range fields {
-				assert.Contains(schema.Properties, field, schemaName)
-				if schemaName == "JobStatus" {
-					require.NotNil(schema.Properties["next_run"])
-					assert.NotContains(schema.Required, "next_run")
-					assert.Equal("date-time", schema.Properties["next_run"].Format)
-				}
-			}
-		}
+		account := doc.Components.Schemas.Map()["AccountStatus"]
+		require.NotNil(account)
+		assert.Contains(account.Properties, "queued_since")
+		job := doc.Components.Schemas.Map()["JobStatus"]
+		require.NotNil(job)
+		assert.Contains(job.Properties, "queued_since")
+		require.NotNil(job.Properties["next_run"])
+		assert.NotContains(job.Required, "next_run")
+		assert.Equal("date-time", job.Properties["next_run"].Format)
 	}
 }
 

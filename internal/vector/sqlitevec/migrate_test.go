@@ -20,6 +20,8 @@ func TestMigrateChunkCheckpointsUpgrade(t *testing.T) {
 	t.Cleanup(func() { require.NoError(db.Close()) })
 	_, err := db.Exec(schemaSQL)
 	require.NoError(err)
+	_, err = db.Exec(`DROP TABLE embedding_chunk_checkpoints`)
+	require.NoError(err)
 	_, err = db.Exec(`INSERT INTO index_generations
 		(id, model, dimension, fingerprint, started_at, state) VALUES (1, 'model', 4, 'fingerprint', 1, 'building')`)
 	require.NoError(err)

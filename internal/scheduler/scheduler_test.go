@@ -3106,39 +3106,46 @@ func TestStartJobDroppedFollowUpIsLogged(t *testing.T) {
 }
 
 func TestSchedulerRunsEmbedAndDocumentVectorAfterSync(t *testing.T) {
-	for _, syncErr := range []error{nil, errors.New("sync failed")} {
-		synctest.Test(t, func(t *testing.T) {
-			assert := assert.New(t)
-			require := require.New(t)
-			s := New(func(context.Context, string) error { return syncErr }).WithWorkTracker(newSerialWorkTracker())
-			order := make(chan string, 8)
-			runner := &fakeRunner{onRunOnce: func(gen vector.GenerationID) {
-				assert.Equal(vector.GenerationID(1), gen)
-				assert.False(s.Status()[0].Running, "embedding has its own gate reservation")
-				order <- "embed"
-			}}
-			job := &EmbedJob{Worker: runner, Backend: &fakeBackend{active: vector.Generation{ID: 1}}}
-			require.NoError(s.SetEmbedJob(job, "", true))
-			require.NoError(s.SetDocumentVectorJob(func(context.Context) error {
-				assert.False(s.Status()[0].Running, "document indexing has its own gate reservation")
-				order <- "document vector"
-				return nil
-			}, "", true))
-			require.NoError(s.AddAccount("test@example.test", "0 0 1 1 *"))
-			s.Start()
-			defer func() { <-s.Stop().Done() }()
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{"successful sync", nil}, {"failed sync", errors.New("sync failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				assert := assert.New(t)
+				require := require.New(t)
+				s := New(func(context.Context, string) error { return test.err }).WithWorkTracker(newSerialWorkTracker())
+				order := make(chan string, 8)
+				runner := &fakeRunner{onRunOnce: func(gen vector.GenerationID) {
+					assert.Equal(vector.GenerationID(1), gen)
+					assert.False(s.Status()[0].Running, "embedding has its own gate reservation")
+					order <- "embed"
+				}}
+				job := &EmbedJob{Worker: runner, Backend: &fakeBackend{active: vector.Generation{ID: 1}}}
+				require.NoError(s.SetEmbedJob(job, "", true))
+				require.NoError(s.SetDocumentVectorJob(func(context.Context) error {
+					assert.False(s.Status()[0].Running, "document indexing has its own gate reservation")
+					order <- "document vector"
+					return nil
+				}, "", true))
+				require.NoError(s.AddAccount("test@example.test", "0 0 1 1 *"))
+				s.Start()
+				defer func() { <-s.Stop().Done() }()
 
-			require.NoError(s.TriggerSync("test@example.test"))
-			synctest.Wait()
-			got := make([]string, 0, 2)
-			for len(order) > 0 {
-				got = append(got, <-order)
-			}
-			if syncErr == nil {
-				assert.ElementsMatch([]string{"embed", "document vector"}, got)
-			} else {
-				assert.Empty(got, "failed sync starts neither vector pass")
-			}
+				require.NoError(s.TriggerSync("test@example.test"))
+				synctest.Wait()
+				got := make([]string, 0, 2)
+				for len(order) > 0 {
+					got = append(got, <-order)
+				}
+				if test.err == nil {
+					assert.ElementsMatch([]string{"embed", "document vector"}, got)
+				} else {
+					assert.Empty(got, "failed sync starts neither vector pass")
+				}
+			})
 		})
 	}
 }

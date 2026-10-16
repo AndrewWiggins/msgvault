@@ -580,21 +580,12 @@ func (s *Scheduler) runSync(email string) {
 	s.mu.RUnlock()
 	// Reserve follow-ups before releasing the sync gate so queued work can run first.
 	if embedAfterSync {
-		s.startVectorPass("embed")
+		_, _ = s.StartJob("embed")
 	}
 	if documentAfterSync {
-		s.startVectorPass("document-vector")
+		_, _ = s.StartJob("document-vector")
 	}
 	s.startVisualPostSync()
-}
-
-// startVectorPass coalesces successful sync triggers into one follow-up.
-func (s *Scheduler) startVectorPass(name string) {
-	run, disp, err := s.reserveGenericJob(name, true)
-	if err != nil || disp != JobStarted {
-		return
-	}
-	go func() { _ = s.runJob(name, run) }()
 }
 
 // logScheduledSyncError keeps transient network failures below the error

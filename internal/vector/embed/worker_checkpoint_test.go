@@ -144,26 +144,3 @@ func TestWorkerCheckpointCleanupFailurePreservesCompletedWork(t *testing.T) {
 	assert.Contains(logs.String(), "checkpoint cleanup failed after coverage committed")
 	assert.Contains(logs.String(), "synthetic checkpoint cleanup failure")
 }
-
-func TestWorkerBudgetDenialLeavesUnstartedMessagesUnfailed(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	f := newWorkerFixture(t, 2)
-	calls := 0
-	f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
-		calls++
-		if calls == 2 {
-			return nil, jobctx.ErrRunBudgetExceeded
-		}
-		return [][]float32{{1, 2, 3, 4}}, nil
-	}
-	worker := newTestWorker(f, 1)
-	worker.deps.MaxConsecutiveFailures = 1
-	ctx := jobctx.WithProgress(t.Context())
-	result, err := worker.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
-	require.ErrorIs(err, jobctx.ErrRunBudgetExceeded)
-	assert.Equal(1, result.Succeeded)
-	assert.Zero(result.Failed, "a denied request leaves its message unfinished")
-	assert.Equal(1, countMissing(t, f.MainDB, int64(f.BuildingGen)))
-	assert.True(jobctx.HasProgress(ctx))
-}

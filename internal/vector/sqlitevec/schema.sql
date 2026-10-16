@@ -182,3 +182,15 @@ CREATE TABLE IF NOT EXISTS document_vector_embeddings (
 );
 CREATE INDEX IF NOT EXISTS idx_document_vector_embeddings_generation
     ON document_vector_embeddings(generation_id, dimension, token);
+
+-- Completed provider inputs awaiting whole-message or contextual publication.
+CREATE TABLE IF NOT EXISTS embedding_chunk_checkpoints (
+    generation_id BIGINT NOT NULL REFERENCES index_generations(id) ON DELETE CASCADE,
+    document_key TEXT NOT NULL DEFAULT '',
+    scope_key TEXT NOT NULL DEFAULT '',
+    message_id BIGINT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    input_hash TEXT NOT NULL,
+    vector_json TEXT NOT NULL,
+    PRIMARY KEY (generation_id, document_key, message_id, chunk_index)
+);

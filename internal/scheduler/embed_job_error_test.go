@@ -22,41 +22,45 @@ func (f convergenceCheckerFunc) CheckConvergence(ctx context.Context, gen vector
 func TestEmbedJobRunHandlesInterruptedPhases(t *testing.T) {
 	failure := errors.New("independent database failure")
 	for _, test := range []struct {
-		name      string
-		configure func(*EmbedJob, *fakeBackend, context.CancelCauseFunc)
+		name                      string
+		configure                 func(*EmbedJob, *fakeBackend, context.CancelCauseFunc)
+		wantErr                   bool
+		runs, backstops, coverage int
+		activations               []vector.GenerationID
+		completeLog               bool
 	}{
 		{"reclaim", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Worker = &fakeRunner{reclaimErr: failure, yieldReclaim: interrupt}
-		}},
+		}, true, 0, 0, 0, nil, false},
 		{"backstop", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.BackstopInterval = 0
 			job.Worker = &fakeRunner{backstopErr: failure, yieldBackstop: interrupt}
-		}},
+		}, true, 1, 1, 0, nil, true},
 		{"backstop success", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.BackstopInterval = 0
 			job.Worker = &fakeRunner{yieldBackstop: interrupt}
-		}},
+		}, false, 1, 1, 0, nil, true},
 		{"interrupted RunOnce", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Worker = &fakeRunner{runErr: failure, yieldCancel: interrupt}
-		}},
+		}, true, 1, 0, 0, nil, false},
 		{"target building lookup", func(job *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Fingerprint = ""
 			backend.buildErr, backend.yieldBuilding = failure, interrupt
-		}},
+		}, true, 0, 0, 0, nil, false},
 		{"target active lookup", func(job *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Fingerprint = ""
 			backend.building = nil
 			backend.activeErr, backend.yieldActive = failure, interrupt
-		}},
+		}, true, 0, 0, 0, nil, false},
 		{"person building lookup", func(_ *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			backend.buildErr, backend.yieldBuilding = failure, interrupt
-		}},
+		}, true, 0, 0, 0, nil, false},
 		{"person active lookup", func(_ *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			backend.activeErr, backend.yieldActive = failure, interrupt
-		}},
+		}, true, 0, 0, 0, nil, false},
 		{"convergence before backstop", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Convergence = &fakeConvergenceChecker{err: failure, cancel: interrupt}
-		}},
+		}, true, 1, 0, 0, nil, true},
 		{"convergence after backstop", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.BackstopInterval = 0
 			checks := 0
@@ -68,25 +72,28 @@ func TestEmbedJobRunHandlesInterruptedPhases(t *testing.T) {
 				interrupt(jobctx.ErrYieldedToWaiter)
 				return ConvergenceResult{}, failure
 			})
-		}},
+		}, true, 1, 1, 0, nil, true},
 		{"coverage", func(job *EmbedJob, _ *fakeBackend, interrupt context.CancelCauseFunc) {
 			job.Store = &fakeCoverage{err: failure, yieldCancel: interrupt}
-		}},
+		}, true, 1, 0, 1, nil, true},
 		{"activation", func(_ *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			backend.activateErr, backend.yieldActivate = failure, interrupt
-		}},
+		}, true, 1, 0, 1, []vector.GenerationID{9}, true},
 		{"activation success", func(_ *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			backend.yieldActivate = interrupt
-		}},
+		}, false, 1, 0, 1, []vector.GenerationID{9}, true},
 		{"sequence-bound activation", func(job *EmbedJob, backend *fakeBackend, interrupt context.CancelCauseFunc) {
 			backend.activateErr, backend.yieldActivate = failure, interrupt
 			job.SequenceBoundActivation = true
 			job.Convergence = &fakeConvergenceChecker{result: ConvergenceResult{
 				MessageCoverageComplete: true, PersonCoverageComplete: true, ReconciliationComplete: true,
 			}}
-		}},
+		}, true, 1, 0, 0, []vector.GenerationID{9}, true},
 	} {
 		for _, interruption := range []string{"none", "cooperative", "cancelled"} {
+			if interruption == "none" && !test.wantErr {
+				continue
+			}
 			t.Run(test.name+"/"+interruption, func(t *testing.T) {
 				require := require.New(t)
 				assert := assert.New(t)
@@ -115,44 +122,33 @@ func TestEmbedJobRunHandlesInterruptedPhases(t *testing.T) {
 				test.configure(job, backend, interrupt)
 				runner, ok := job.Worker.(*fakeRunner)
 				require.True(ok)
+				coverage, ok = job.Store.(*fakeCoverage)
+				require.True(ok)
 
 				err := job.run(ctx)
 
-				if test.name == "activation success" || test.name == "backstop success" {
-					require.NoError(err)
-				} else {
+				if test.wantErr {
 					require.ErrorIs(err, failure)
-					require.ErrorIs(jobctx.ErrorAfterYield(ctx, err), failure)
+				} else {
+					require.NoError(err)
 				}
 				if interruption != "none" {
-					assert.NotContains(logs.String(), "generation lookup failed")
-					for _, message := range []string{"embed reclaim failed", "embed run failed", "convergence check after run failed", "embed backstop failed"} {
+					if test.wantErr {
+						require.ErrorIs(jobctx.ErrorAfterYield(ctx, err), failure)
+					}
+					_, runs, _ := runner.calls()
+					backstops, _ := runner.backstops()
+					assert.Equal(test.runs, runs)
+					assert.Equal(test.backstops, backstops)
+					assert.Equal(test.coverage, coverage.calls)
+					assert.Equal(test.activations, backend.activations())
+					assert.Equal(test.completeLog, bytes.Contains(logs.Bytes(), []byte("embed run complete")))
+					for _, message := range []string{
+						"generation lookup failed", "embed reclaim failed", "embed run failed",
+						"convergence check after run failed", "embed backstop failed",
+						"activation failed", "building generation activated",
+					} {
 						assert.NotContains(logs.String(), message)
-					}
-					if test.name == "interrupted RunOnce" || test.name == "reclaim" {
-						assert.NotContains(logs.String(), "embed run complete")
-					}
-					if test.name == "interrupted RunOnce" || test.name == "reclaim" || test.name == "backstop" || test.name == "backstop success" || test.name == "convergence before backstop" {
-						assert.Zero(coverage.calls)
-						assert.Empty(backend.activations())
-					}
-					assert.NotContains(logs.String(), "activation failed")
-					assert.NotContains(logs.String(), "building generation activated")
-					if test.name == "coverage" {
-						assert.Empty(backend.activations())
-					}
-					if test.name == "backstop" || test.name == "backstop success" {
-						assert.Contains(logs.String(), "embed run complete")
-						n, _ := runner.backstops()
-						assert.Equal(1, n)
-					}
-					if test.name == "reclaim" {
-						_, runs, _ := runner.calls()
-						assert.Zero(runs)
-					}
-					if test.name == "target building lookup" || test.name == "target active lookup" {
-						_, runs, _ := runner.calls()
-						assert.Zero(runs)
 					}
 				}
 				switch interruption {

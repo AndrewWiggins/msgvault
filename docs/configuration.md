@@ -1873,12 +1873,14 @@ Empty config disables scheduled embedding; you can still run
 | `run_after_sync` | `false` | Run an embed pass after successful scheduled Gmail, IMAP, Teams, and Discord syncs. Other sources use the standalone cron or a manual build. |
 
 On unreleased `main`, automatic message and document-vector passes share a
-five-minute work window plus one configured `vector.embeddings.timeout`, starting
-after they acquire the daemon's work gate.
+five-minute window for starting provider requests after acquiring the daemon's
+work gate. The hard runtime limit is five minutes plus one configured
+`vector.embeddings.timeout` and five seconds to publish completed results.
 After holding the gate for one minute while scheduled syncs or non-vector jobs
-wait, a pass is asked to yield; cancellation follows five seconds later if
-needed. Vector waiters do not preempt other scheduled work. The one-minute
-yield timer starts when each pass acquires the gate. Syncs also wait for work
+wait, a pass is asked to yield. Cancellation normally follows five seconds later.
+When a provider request is already running and the pass has saved no progress,
+that request can finish within the hard runtime limit. Vector waiters do not
+preempt other scheduled work. The one-minute yield timer starts when each pass acquires the gate. Syncs also wait for work
 already queued ahead of them.
 Committed vectors and scan cursors survive interruption. Ordinary yields resume
 behind queued work immediately. Runtime budget expiry resumes immediately when

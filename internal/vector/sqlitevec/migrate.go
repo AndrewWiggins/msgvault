@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-
-	"go.kenn.io/msgvault/internal/vector"
 )
 
 //go:embed schema.sql
@@ -46,9 +44,6 @@ func Migrate(ctx context.Context, db *sql.DB, defaultDim int) error {
 	}
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, vector.ChunkCheckpointSchema); err != nil {
-		return fmt.Errorf("add embedding chunk checkpoints: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, acceleratorMaintenanceSQL); err != nil {
 		return fmt.Errorf("install accelerator maintenance triggers: %w", err)

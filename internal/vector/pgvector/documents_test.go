@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
 )
 
@@ -550,11 +551,18 @@ func TestDocumentMigrationUpgradePostgreSQL(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, Migrate(ctx, db, 0, true))
 	require.NoError(t, Migrate(ctx, db, 0, true), "migration must be idempotent")
-	for _, table := range []string{"embedding_documents", "embedding_document_scopes", "embedding_document_members", "embedding_document_progress"} {
+	for _, table := range []string{"embedding_documents", "embedding_document_scopes", "embedding_document_members", "embedding_document_progress", "embedding_chunk_checkpoints"} {
 		var exists bool
 		require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists))
 		assert.True(t, exists, table)
 	}
+	checkpoints := vector.ChunkCheckpointStore{DB: db, Rebind: (&store.PostgreSQLDialect{}).Rebind}
+	checkpoint := vector.ChunkCheckpoint{MessageID: 99, InputHash: "synthetic", Vector: []float32{0.1, 0.2}}
+	require.NoError(t, checkpoints.Save(ctx, 1, []vector.ChunkCheckpoint{checkpoint}))
+	require.NoError(t, Migrate(ctx, db, 0, true))
+	gotCheckpoints, err := checkpoints.Load(ctx, 1, 99)
+	require.NoError(t, err)
+	assert.Equal(t, map[int]vector.ChunkCheckpoint{0: checkpoint}, gotCheckpoints)
 	var upgradedProgress vector.DocumentProgress
 	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT change_sequence, reconcile_cursor, journal_cursor

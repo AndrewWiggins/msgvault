@@ -7,8 +7,6 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
-
-	"go.kenn.io/msgvault/internal/vector"
 )
 
 //go:embed schema.sql
@@ -81,9 +79,6 @@ func Migrate(ctx context.Context, db migrateExecer, defaultDim int, skipExtensio
 	}
 	if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply pgvector schema: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, vector.ChunkCheckpointSchema); err != nil {
-		return fmt.Errorf("add embedding chunk checkpoints: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		ALTER TABLE embedding_document_progress

@@ -159,10 +159,6 @@ func TestWorkerPG_RunOnce_EndToEnd(t *testing.T) {
 		err, "pgvector.Open")
 
 	t.Cleanup(func() { _ = backend.Close() })
-	// Existing vector databases gain the checkpoint table on their next open.
-	_, err = db.Exec(`DROP TABLE embedding_chunk_checkpoints`)
-	require.NoError(err)
-	require.NoError(pgvector.Migrate(ctx, db, 4, true))
 
 	gen, err := backend.CreateGeneration(ctx, "fake", 4, "")
 	require.NoError(
