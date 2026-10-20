@@ -281,7 +281,9 @@ type MessageFilter struct {
 
 // Pagination specifies limit and offset for paginated queries.
 type Pagination struct {
-	// PageOnly means the caller ignores TotalCount and Stats, so SearchFastWithStats may skip them.
+	// PageOnly skips the count and stats in the SQLite/PostgreSQL engine.
+	// DuckDB keeps its cheap count over its cached match table.
+	// The API handler reports TotalCount as -1 either way.
 	PageOnly bool
 	Limit    int
 	Offset   int

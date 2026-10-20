@@ -3979,7 +3979,6 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		if pageOnly {
 			messages, err = engine.SearchDeep(r.Context(), &searchScope, filter, limit+1, offset)
-			totalCount = -1
 		} else {
 			var result *query.SearchFastResult
 			result, err = engine.SearchDeepWithStats(r.Context(), &searchScope, filter, limit+1, offset)
