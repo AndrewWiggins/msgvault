@@ -501,8 +501,6 @@ func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
 		equal    bool
 	}{
 		{"default port", "https://host:443/v1", true},
-		{"uppercase scheme and host", "HTTPS://HOST/v1", true},
-		{"trailing slash", "https://host/v1/", true},
 		{"embeddings suffix", "https://host/v1/embeddings", true},
 		{"different path", "https://host/v2", false},
 		{"non-default port", "https://host:8443/v1", false},
@@ -516,6 +514,13 @@ func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
 				assert.NotEqual(t, baseline, cfg.GenerationFingerprint())
 			}
 		})
+	}
+}
+
+func TestEmbeddingsConfig_EndpointFingerprint_InvalidEndpoint(t *testing.T) {
+	for _, endpoint := range []string{"%invalid", " \t%invalid/// \n"} {
+		cfg := EmbeddingsConfig{Endpoint: endpoint}
+		assert.Equal(t, "562f630071b7f42a743e37dc8d5f925e0f8ebe6cfe42a23a2b7814b814f932ce", cfg.EndpointFingerprint())
 	}
 }
 

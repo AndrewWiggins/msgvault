@@ -499,9 +499,10 @@ func (c *Config) GenerationFingerprint() string {
 func (e EmbeddingsConfig) EndpointFingerprint() string {
 	endpoint := strings.TrimRight(e.Endpoint, "/")
 	if e.EffectiveAPIFormat() == APIFormatOpenAI {
+		// The digest depends on kit's CanonicalEndpoint output; recheck golden tests on a kit bump.
 		canonical, err := embedconfig.CanonicalEndpoint(e.Endpoint, true)
 		if err != nil {
-			endpoint = strings.TrimSpace(e.Endpoint)
+			endpoint = strings.TrimRight(strings.TrimSpace(e.Endpoint), "/")
 		} else {
 			// Kit's embedclient appends /embeddings unless already present.
 			endpoint = strings.TrimSuffix(canonical, "/embeddings")

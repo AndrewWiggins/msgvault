@@ -660,13 +660,16 @@ func TestBackend_AdoptEndpoint(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			b, ctx, db := newBackendForTest(t)
 			vectortest.EndpointAdoption(t, b, b.DB(), (&store.PostgreSQLDialect{}).Rebind, func(hash string) vector.Backend {
+				require.NoError(t, b.Close())
 				opts := Options{DB: db, Dimension: 768, SkipMigrate: true, ReadOnly: mode == "read-only", EndpointFingerprint: hash}
 				if mode == "empty" {
 					opts.EndpointFingerprint = ""
 				}
-				reopened, err := Open(ctx, opts)
+				var err error
+				b, err = Open(ctx, opts)
 				require.NoError(t, err)
-				return reopened
+				t.Cleanup(func() { _ = b.Close() })
+				return b
 			}, mode == "writable")
 		})
 	}

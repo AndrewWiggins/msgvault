@@ -62,10 +62,7 @@ func runEmbed(cmd *cobra.Command) error {
 		return err
 	}
 
-	endpointFP := ""
-	if cfg.Vector.Enabled {
-		endpointFP = cfg.Vector.Embeddings.EndpointFingerprint()
-	}
+	endpointFP := cfg.Vector.Embeddings.EndpointFingerprint()
 	var (
 		backend   vector.Backend
 		vectorsDB *sql.DB
@@ -84,11 +81,10 @@ func runEmbed(cmd *cobra.Command) error {
 		// against pgx.
 		pgb, err := pgvector.Open(ctx, pgvector.Options{
 			EndpointFingerprint: endpointFP,
-
-			DB:            s.DB(),
-			Dimension:     cfg.Vector.Embeddings.Dimension,
-			BuildScope:    cfg.Vector.Embed.Scope.BuildScope(),
-			SkipExtension: cfg.Vector.SkipExtensionCreate,
+			DB:                  s.DB(),
+			Dimension:           cfg.Vector.Embeddings.Dimension,
+			BuildScope:          cfg.Vector.Embed.Scope.BuildScope(),
+			SkipExtension:       cfg.Vector.SkipExtensionCreate,
 		})
 		if err != nil {
 			return fmt.Errorf("open pgvector backend: %w", err)
@@ -108,15 +104,14 @@ func runEmbed(cmd *cobra.Command) error {
 		}
 		sb, err := sqlitevec.Open(ctx, sqlitevec.Options{
 			EndpointFingerprint: endpointFP,
-
-			Path:            vecPath,
-			MainPath:        cfg.DatabaseDSN(),
-			Dimension:       cfg.Vector.Embeddings.Dimension,
-			MainDB:          s.DB(),
-			BuildScope:      cfg.Vector.Embed.Scope.BuildScope(),
-			ANNOversample:   cfg.Vector.Search.ANNOversample,
-			ANNNProbe:       cfg.Vector.Search.ANNNProbe,
-			AcceleratorMode: cfg.Vector.Search.SQLiteAccelerator,
+			Path:                vecPath,
+			MainPath:            cfg.DatabaseDSN(),
+			Dimension:           cfg.Vector.Embeddings.Dimension,
+			MainDB:              s.DB(),
+			BuildScope:          cfg.Vector.Embed.Scope.BuildScope(),
+			ANNOversample:       cfg.Vector.Search.ANNOversample,
+			ANNNProbe:           cfg.Vector.Search.ANNNProbe,
+			AcceleratorMode:     cfg.Vector.Search.SQLiteAccelerator,
 		})
 		if err != nil {
 			return fmt.Errorf("open vectors.db: %w", err)

@@ -464,7 +464,7 @@ func runEmbeddingsActivate(cmd *cobra.Command, args []string) error {
 	// state changes after this convergence snapshot.
 	var contextualSequence *int64
 	if !embeddingsActivateForce {
-		state, err := configuredConvergenceState(cmd.Context(), cfg.Vector, gen)
+		state, err := configuredConvergenceState(cmd.Context(), cfg.Vector, backend, gen)
 		if err != nil {
 			return err
 		}
@@ -620,7 +620,7 @@ func planCLIEmbeddingsActivate(
 	}
 	defer closeDB()
 
-	_, closeBackend, err := openEmbeddingsBackend(ctx)
+	backend, closeBackend, err := openEmbeddingsBackend(ctx)
 	if err != nil {
 		return api.CLIEmbeddingsPlanResponse{}, err
 	}
@@ -639,7 +639,7 @@ func planCLIEmbeddingsActivate(
 			gen, row.Fingerprint, expected)
 	}
 	if !force {
-		if err := requireConfiguredConvergence(ctx, vecCfg, gen); err != nil {
+		if err := requireConfiguredConvergence(ctx, vecCfg, backend, gen); err != nil {
 			return api.CLIEmbeddingsPlanResponse{}, err
 		}
 	}
@@ -665,8 +665,8 @@ func planCLIEmbeddingsActivate(
 // SourceIDs): the checker's missing count is scope-aware, and building it
 // from the unresolved global would count out-of-scope messages as missing
 // and refuse to activate a completed account-scoped generation.
-func requireConfiguredConvergence(ctx context.Context, vecCfg vector.Config, gen vector.GenerationID) error {
-	state, err := configuredConvergenceState(ctx, vecCfg, gen)
+func requireConfiguredConvergence(ctx context.Context, vecCfg vector.Config, backend vector.Backend, gen vector.GenerationID) error {
+	state, err := configuredConvergenceState(ctx, vecCfg, backend, gen)
 	if err != nil {
 		return err
 	}
@@ -676,7 +676,7 @@ func requireConfiguredConvergence(ctx context.Context, vecCfg vector.Config, gen
 	return nil
 }
 
-func configuredConvergenceState(ctx context.Context, vecCfg vector.Config, gen vector.GenerationID) (scheduler.ConvergenceResult, error) {
+func configuredConvergenceState(ctx context.Context, vecCfg vector.Config, backend vector.Backend, gen vector.GenerationID) (scheduler.ConvergenceResult, error) {
 	inv := invocationFromContext(ctx)
 	if inv == nil || inv.cfg == nil {
 		return scheduler.ConvergenceResult{}, errors.New("configuration is unavailable")
@@ -686,11 +686,6 @@ func configuredConvergenceState(ctx context.Context, vecCfg vector.Config, gen v
 		return scheduler.ConvergenceResult{}, fmt.Errorf("open main db for convergence: %w", err)
 	}
 	defer func() { _ = mainStore.Close() }()
-	backend, closeBackend, err := openEmbeddingsBackend(ctx)
-	if err != nil {
-		return scheduler.ConvergenceResult{}, err
-	}
-	defer closeBackend()
 	personGate := vector.NewPinnedExactSemanticPersonEmbeddingGate(
 		vecCfg, currentSemanticPersonVectorConfigSource(inv), mainStore,
 	)
@@ -857,12 +852,11 @@ func openEmbeddingsBackendWithMode(ctx context.Context, readOnly bool) (vector.B
 		// sets both ReadOnly and SkipMigrate to avoid schema work and backfills.
 		b, err := pgvector.Open(ctx, pgvector.Options{
 			EndpointFingerprint: endpointFP,
-
-			DB:          db,
-			Dimension:   cfg.Vector.Embeddings.Dimension,
-			SkipMigrate: true,
-			ReadOnly:    readOnly,
-			BuildScope:  cfg.Vector.Embed.Scope.BuildScope(),
+			DB:                  db,
+			Dimension:           cfg.Vector.Embeddings.Dimension,
+			SkipMigrate:         true,
+			ReadOnly:            readOnly,
+			BuildScope:          cfg.Vector.Embed.Scope.BuildScope(),
 		})
 		if err != nil {
 			_ = db.Close()
@@ -904,16 +898,15 @@ func openEmbeddingsBackendWithMode(ctx context.Context, readOnly bool) (vector.B
 	}
 	b, err := sqlitevec.Open(ctx, sqlitevec.Options{
 		EndpointFingerprint: endpointFP,
-
-		Path:             vecPath,
-		MetadataReadOnly: readOnly,
-		MainPath:         dsn,
-		Dimension:        cfg.Vector.Embeddings.Dimension,
-		MainDB:           mainStore.DB(),
-		BuildScope:       cfg.Vector.Embed.Scope.BuildScope(),
-		ANNOversample:    cfg.Vector.Search.ANNOversample,
-		ANNNProbe:        cfg.Vector.Search.ANNNProbe,
-		AcceleratorMode:  cfg.Vector.Search.SQLiteAccelerator,
+		Path:                vecPath,
+		MetadataReadOnly:    readOnly,
+		MainPath:            dsn,
+		Dimension:           cfg.Vector.Embeddings.Dimension,
+		MainDB:              mainStore.DB(),
+		BuildScope:          cfg.Vector.Embed.Scope.BuildScope(),
+		ANNOversample:       cfg.Vector.Search.ANNOversample,
+		ANNNProbe:           cfg.Vector.Search.ANNNProbe,
+		AcceleratorMode:     cfg.Vector.Search.SQLiteAccelerator,
 	})
 	if err != nil {
 		_ = mainStore.Close()

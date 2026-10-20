@@ -570,11 +570,10 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 		// live alongside messages, so there is no separate vectors.db.
 		pgb, err := pgvector.Open(ctx, pgvector.Options{
 			EndpointFingerprint: endpointFP,
-
-			DB:          mainDB,
-			Dimension:   vecCfg.Embeddings.Dimension,
-			BuildScope:  vecCfg.Embed.Scope.BuildScope(),
-			SkipMigrate: readOnly,
+			DB:                  mainDB,
+			Dimension:           vecCfg.Embeddings.Dimension,
+			BuildScope:          vecCfg.Embed.Scope.BuildScope(),
+			SkipMigrate:         readOnly,
 			// ReadOnly MUST track readOnly here: this is the MCP read-only
 			// path (store.OpenReadOnly). When set, Open performs no writes —
 			// no schema apply, no orphan reset, no upgrade backfill — so the
@@ -603,15 +602,14 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 		}
 		sb, err := sqlitevec.Open(ctx, sqlitevec.Options{
 			EndpointFingerprint: endpointFP,
-
-			Path:            vecPath,
-			MainPath:        mainPath,
-			Dimension:       vecCfg.Embeddings.Dimension,
-			MainDB:          mainDB,
-			BuildScope:      vecCfg.Embed.Scope.BuildScope(),
-			ANNOversample:   vecCfg.Search.ANNOversample,
-			ANNNProbe:       vecCfg.Search.ANNNProbe,
-			AcceleratorMode: vecCfg.Search.SQLiteAccelerator,
+			Path:                vecPath,
+			MainPath:            mainPath,
+			Dimension:           vecCfg.Embeddings.Dimension,
+			MainDB:              mainDB,
+			BuildScope:          vecCfg.Embed.Scope.BuildScope(),
+			ANNOversample:       vecCfg.Search.ANNOversample,
+			ANNNProbe:           vecCfg.Search.ANNNProbe,
+			AcceleratorMode:     vecCfg.Search.SQLiteAccelerator,
 			// Honor the read-only signal on SQLite too: when mainDB is a
 			// query-only handle (MCP), skip the embed_gen upgrade backfill,
 			// which would write through it. Migrate still runs (vectors.db
