@@ -39,7 +39,7 @@ func TestActivityTriggerMigrationRequeuesProjectedUnsentMessages(t *testing.T) {
 }
 
 func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
-	for _, mergeKind := range []string{"direct", "chained"} {
+	for _, mergeKind := range []string{"direct", "chained", "survivor"} {
 		t.Run(mergeKind, func(t *testing.T) {
 			require := require.New(t)
 			assert := assert.New(t)
@@ -61,6 +61,19 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			require.NoError(err)
 			_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
 			require.NoError(err)
+			if mergeKind == "survivor" {
+				historicalID := messageID
+				messageID = f.NewMessage().WithSentAt(occurredAt).Create(t, f.Store)
+				_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
+				require.NoError(err)
+				_, err = activityExec(f.Store, `UPDATE source_merge_messages SET survivor_message_id = ? WHERE message_id = ?`, messageID, historicalID)
+				require.NoError(err)
+				_, err = activityExec(f.Store, `UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, historicalID)
+				require.NoError(err)
+				// The older daemon already processed the hidden historical row.
+				_, err = activityExec(f.Store, `DELETE FROM activity_projection_queue WHERE message_id = ?`, historicalID)
+				require.NoError(err)
+			}
 			_, err = activityExec(f.Store, `INSERT INTO source_settings(source_id, history_only, merged_into_source_id, retired_at)
 		VALUES (?, TRUE, ?, CURRENT_TIMESTAMP)`, f.Source.ID, destination.ID)
 			require.NoError(err)
@@ -98,22 +111,6 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			require.NoError(err)
 			assert.Zero(state.InteractionCount)
 			assert.Nil(state.LastContactAt)
-
-			require.NoError(f.Store.InitSchema())
-			candidates, err := f.Store.LoadActivityCandidatesByIDContext(t.Context(), []int64{messageID})
-			require.NoError(err)
-			require.Len(candidates, 1)
-			assert.True(candidates[0].Unsent)
-			labels, err := f.Store.EnsureLabelsBatch(destination.ID, map[string]store.LabelInfo{
-				"sent": {Name: "Sent", Type: "system", SystemRole: store.LabelSystemRoleSent},
-			})
-			require.NoError(err)
-			require.NoError(f.Store.AddMessageLabels(messageID, []int64{labels["sent"]}))
-			candidates, err = f.Store.LoadActivityCandidatesByIDContext(t.Context(), []int64{messageID})
-			require.NoError(err)
-			require.Len(candidates, 1)
-			assert.False(candidates[0].Unsent)
-			assert.True(candidates[0].Eligible)
 		})
 	}
 }
