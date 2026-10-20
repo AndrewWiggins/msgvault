@@ -15,8 +15,8 @@ const EmbedGenBackfillMigration = "embed_gen_backfill_active_v1"
 
 var endpointSegment = regexp.MustCompile(`:u[0-9a-f]{64}$`)
 
-// HasEndpointSegment recognizes a trailing endpoint identity.
-func HasEndpointSegment(fp string) bool {
+// hasEndpointSegment recognizes a trailing endpoint identity.
+func hasEndpointSegment(fp string) bool {
 	return endpointSegment.MatchString(fp)
 }
 
@@ -40,7 +40,7 @@ func AdoptEndpoint(ctx context.Context, db *sql.DB, rebind func(string) string, 
 		if err := rows.Scan(&g.id, &g.fingerprint); err != nil {
 			return fmt.Errorf("read legacy generation: %w", err)
 		}
-		if !HasEndpointSegment(g.fingerprint) {
+		if !hasEndpointSegment(g.fingerprint) {
 			legacy = append(legacy, g)
 		}
 	}

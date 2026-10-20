@@ -753,7 +753,6 @@ metadata search or use `search_message_bodies`. Once `msgvault embeddings
 build` reports the new generation activated, vector and hybrid modes resume.
 
 An older index records the configured endpoint at the first writable vector start with vectors enabled; an endpoint change made before that start goes undetected.
-A read-only process, such as MCP stdio, or `embeddings status` run before that first writable start reports `index_stale` until that start.
 Downgrading afterward reports `index_stale`.
 
 ## Troubleshooting

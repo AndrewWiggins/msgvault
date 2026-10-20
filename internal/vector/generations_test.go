@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHasEndpointSegment(t *testing.T) {
+func Test_hasEndpointSegment(t *testing.T) {
 	for _, tc := range []struct {
 		fingerprint string
 		want        bool
@@ -21,7 +21,7 @@ func TestHasEndpointSegment(t *testing.T) {
 		{"m:768:u" + strings.Repeat("a", 65), false},
 		{"m:768:u" + strings.Repeat("A", 64), false},
 	} {
-		assert.Equal(t, tc.want, HasEndpointSegment(tc.fingerprint), tc.fingerprint)
+		assert.Equal(t, tc.want, hasEndpointSegment(tc.fingerprint), tc.fingerprint)
 	}
 }
 

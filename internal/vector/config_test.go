@@ -512,7 +512,7 @@ func TestEmbeddingsConfig_EndpointFingerprint_InvalidEndpoint(t *testing.T) {
 		endpoint string
 		want     string
 	}{
-		{"http://example.com/v1", "eee5fa66a74b35541f07496cdb6f16547f369cef4bf18ffbb94fff8f3478cec8"},
+		{"https://example.com/v1/../embeddings", "c4c05946a2cb21b03d4828cec7b442db86dfb56f6fd583e22bf9c5d64ad2eefa"},
 		{"https://host/v1?x=1", "5ca34cf8068dc4c8aa590026a55fb63c409fc6d395a1999af58b3a2b479c54d2"},
 	} {
 		cfg := EmbeddingsConfig{Endpoint: tc.endpoint}
