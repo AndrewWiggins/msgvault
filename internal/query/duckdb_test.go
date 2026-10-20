@@ -4903,6 +4903,8 @@ func TestDuckDBFilenameFilterParquet(t *testing.T) {
 }
 
 func TestSearchFastWithStats_AfterID(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
 	engine := newParquetEngine(t)
 	q := search.Parse("Hello")
 	var ids []int64
@@ -4910,20 +4912,20 @@ func TestSearchFastWithStats_AfterID(t *testing.T) {
 	for afterID := int64(0); ; {
 		result, err := engine.SearchFastWithStats(t.Context(), q, "Hello",
 			MessageFilter{Pagination: Pagination{AfterID: &afterID}}, ViewSenders, 1, 0)
-		require.NoError(t, err)
+		require.NoError(err)
 		if cacheSeq == 0 {
 			cacheSeq = engine.tempTableSeq.Load()
 		} else {
-			assert.Equal(t, cacheSeq, engine.tempTableSeq.Load())
+			assert.Equal(cacheSeq, engine.tempTableSeq.Load())
 		}
 		if len(result.Messages) == 0 {
-			assert.Equal(t, result.TotalCount, int64(len(ids)))
+			assert.Equal(int64(len(ids)), result.TotalCount)
 			break
 		}
-		require.Len(t, result.Messages, 1)
-		require.Greater(t, result.Messages[0].ID, afterID)
+		require.Len(result.Messages, 1)
+		require.Greater(result.Messages[0].ID, afterID)
 		afterID = result.Messages[0].ID
 		ids = append(ids, afterID)
 	}
-	require.NotEmpty(t, ids)
+	require.NotEmpty(ids)
 }

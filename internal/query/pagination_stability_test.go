@@ -152,6 +152,8 @@ func assertDisjointAndComplete(t *testing.T, want map[int64]struct{}, got []int6
 func TestSearchPaginationAfterID(t *testing.T) {
 	for _, mode := range []string{"fast", "deep", "deep page only"} {
 		t.Run(mode, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
 			st := testutil.NewTestStore(t)
 			src, want := seedPaginationStabilityFixture(t, st)
 			eng := query.NewEngine(st.DB(), st.IsPostgreSQL())
@@ -164,7 +166,7 @@ func TestSearchPaginationAfterID(t *testing.T) {
 				if mode == "deep page only" {
 					var err error
 					rows, err = eng.SearchDeep(t.Context(), q, filter, 1, 0)
-					require.NoError(t, err)
+					require.NoError(err)
 				} else {
 					var result *query.SearchFastResult
 					var err error
@@ -173,27 +175,27 @@ func TestSearchPaginationAfterID(t *testing.T) {
 					} else {
 						result, err = eng.SearchDeepWithStats(t.Context(), q, filter, 1, 0)
 					}
-					require.NoError(t, err)
+					require.NoError(err)
 					wantCount := int64(3)
 					if afterID > 0 {
 						wantCount = 2
 					}
-					assert.Equal(t, wantCount, result.TotalCount)
-					require.NotNil(t, result.Stats)
-					assert.Equal(t, wantCount, result.Stats.MessageCount)
+					assert.Equal(wantCount, result.TotalCount)
+					require.NotNil(result.Stats)
+					assert.Equal(wantCount, result.Stats.MessageCount)
 					rows = result.Messages
 				}
 				if len(rows) == 0 {
 					break
 				}
-				require.Len(t, rows, 1)
-				require.Greater(t, rows[0].ID, afterID)
+				require.Len(rows, 1)
+				require.Greater(rows[0].ID, afterID)
 				afterID = rows[0].ID
 				seen = append(seen, afterID)
 				if len(seen) == 1 {
 					// Removing an earlier match must leave the next page intact.
 					_, err := st.DB().Exec(st.Rebind("UPDATE messages SET subject = 'removed' WHERE id = ?"), afterID)
-					require.NoError(t, err)
+					require.NoError(err)
 				}
 			}
 			assertDisjointAndComplete(t, want, seen)

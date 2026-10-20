@@ -2722,14 +2722,16 @@ func TestEngineSearchRequiresAfterIDEcho(t *testing.T) {
 			{name: "start", echo: 0},
 		} {
 			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				assert := assert.New(t)
+				require := require.New(t)
 				afterID := int64(42)
 				if tc.name == "start" {
 					afterID = 0
 				}
 				store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
-					assert.Equal(t, "/api/v1/search/"+mode, r.URL.Path)
-					assert.Equal(t, strconv.FormatInt(afterID, 10), r.URL.Query().Get("after_id"))
-					assert.Equal(t, "true", r.URL.Query().Get("page_only"))
+					assert.Equal("/api/v1/search/"+mode, r.URL.Path)
+					assert.Equal(strconv.FormatInt(afterID, 10), r.URL.Query().Get("after_id"))
+					assert.Equal("true", r.URL.Query().Get("page_only"))
 					response := map[string]any{"query": "needle", "messages": []map[string]any{{"id": 43}}, "total_count": -1}
 					if tc.echo != nil {
 						response["after_id"] = tc.echo
@@ -2745,14 +2747,14 @@ func TestEngineSearchRequiresAfterIDEcho(t *testing.T) {
 					rows, err = engine.SearchAfterID(t.Context(), search.Parse("needle"), afterID, 10)
 				}
 				if tc.wantError {
-					require.Error(t, err)
-					assert.Contains(t, err.Error(), "after_id")
-					assert.Contains(t, err.Error(), "upgrade")
-					assert.Nil(t, rows)
+					require.Error(err)
+					assert.Contains(err.Error(), "after_id")
+					assert.Contains(err.Error(), "upgrade")
+					assert.Nil(rows)
 				} else {
-					require.NoError(t, err)
-					require.Len(t, rows, 1)
-					assert.Equal(t, int64(43), rows[0].ID)
+					require.NoError(err)
+					require.Len(rows, 1)
+					assert.Equal(int64(43), rows[0].ID)
 				}
 			})
 		}

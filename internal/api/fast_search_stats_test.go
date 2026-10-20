@@ -144,9 +144,11 @@ func TestSearchAfterID(t *testing.T) {
 	for _, route := range []string{"fast", "deep"} {
 		for _, pageOnly := range []string{"false", "true"} {
 			t.Run(route+"/page_only="+pageOnly, func(t *testing.T) {
+				assert := assert.New(t)
+				require := require.New(t)
 				check := func(f query.MessageFilter) {
-					require.NotNil(t, f.Pagination.AfterID)
-					assert.Equal(t, int64(42), *f.Pagination.AfterID)
+					require.NotNil(f.Pagination.AfterID)
+					assert.Equal(int64(42), *f.Pagination.AfterID)
 				}
 				engine := &querytest.MockEngine{
 					SearchFastWithStatsFunc: func(_ context.Context, _ *search.Query, _ string, f query.MessageFilter, _ query.ViewType, _, _ int) (*query.SearchFastResult, error) {
@@ -163,12 +165,12 @@ func TestSearchAfterID(t *testing.T) {
 					},
 				}
 				response := doGet(newTestServerWithEngine(t, engine), "/api/v1/search/"+route+"?q=needle&after_id=42&page_only="+pageOnly)
-				require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+				require.Equal(http.StatusOK, response.Code, response.Body.String())
 				var body map[string]json.RawMessage
-				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
-				assert.JSONEq(t, "42", string(body["after_id"]))
+				require.NoError(json.Unmarshal(response.Body.Bytes(), &body))
+				assert.JSONEq("42", string(body["after_id"]))
 				if route == "deep" {
-					assert.JSONEq(t, "false", string(body["has_more"]))
+					assert.JSONEq("false", string(body["has_more"]))
 				}
 			})
 		}
