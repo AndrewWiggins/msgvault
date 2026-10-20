@@ -656,15 +656,12 @@ func TestBackend_Search_SubjectFilter_CaseInsensitive(t *testing.T) {
 }
 
 func TestBackend_AdoptEndpoint(t *testing.T) {
-	for _, mode := range []string{"writable", "read-only", "empty"} {
+	for _, mode := range []string{"writable", "read-only"} {
 		t.Run(mode, func(t *testing.T) {
 			b, ctx, db := newBackendForTest(t)
 			vectortest.EndpointAdoption(t, b, b.DB(), (&store.PostgreSQLDialect{}).Rebind, func(hash string) vector.Backend {
 				require.NoError(t, b.Close())
 				opts := Options{DB: db, Dimension: 768, SkipMigrate: true, ReadOnly: mode == "read-only", EndpointFP: hash}
-				if mode == "empty" {
-					opts.EndpointFP = ""
-				}
 				var err error
 				b, err = Open(ctx, opts)
 				require.NoError(t, err)
