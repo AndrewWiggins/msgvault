@@ -2110,12 +2110,6 @@ func (e *SQLiteEngine) Search(ctx context.Context, q *search.Query, limit, offse
 	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset, nil)
 }
 
-// SearchAfterID preserves query scope while paging by message ID.
-func (e *SQLiteEngine) SearchAfterID(ctx context.Context, q *search.Query, afterID int64, limit int) ([]MessageSummary, error) {
-	conditions, args, ftsJoin := e.buildSearchQueryParts(ctx, q)
-	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, 0, &afterID)
-}
-
 // SearchMessageBodies performs exact body-only full-text search and uses the
 // active backend's native tokenizer to attach bounded context to every hit.
 func (e *SQLiteEngine) SearchMessageBodies(ctx context.Context, q *search.Query, limit, offset int) (*SearchFastResult, error) {

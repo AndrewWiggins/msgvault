@@ -23,6 +23,9 @@ var ErrNotSupported = errors.New("operation not supported through daemon API")
 // ErrMessageRawNotFound means the daemon holds the message but no raw data.
 var ErrMessageRawNotFound = errors.New("message raw data not found")
 
+// ErrSearchCursorUnsupported means the daemon did not confirm the requested cursor.
+var ErrSearchCursorUnsupported = errors.New("daemon did not confirm after_id; upgrade the daemon to a build that supports after_id search cursors")
+
 const (
 	apiValueCount   = "count"
 	apiValueLabels  = "labels"
@@ -1681,7 +1684,7 @@ func sourceIDForSourceIDs(sourceID *int64, sourceIDs []int64) *int64 {
 
 func requireAfterIDEcho(requested, applied *int64) error {
 	if requested != nil && (applied == nil || *requested != *applied) {
-		return errors.New("daemon did not confirm after_id; upgrade the daemon to API schema 3.23.0 or newer")
+		return ErrSearchCursorUnsupported
 	}
 	return nil
 }

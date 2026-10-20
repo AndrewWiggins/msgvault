@@ -1889,7 +1889,7 @@ query in `q`. The response includes the page in `messages` and the full match
 count in `total_count`; no separate count request is needed. If the count is
 unavailable, `total_count` is `-1`.
 
-Use `after_id=0` to start paging in ascending message-ID order, then pass the last row's ID as `after_id`; the response echoes the cursor, and combining it with `offset > 0` returns 400.
+Use `after_id=0` on fast search or `GET /api/v1/search/deep` to start paging in ascending message-ID order, then pass the last row's ID as `after_id`. The response echoes the cursor. `total_count` counts all matches, including those at or before the cursor. Combining `after_id` with `offset > 0`, or with `scope=body` on deep search, returns 400.
 
 Use `limit` and `offset` to page through results. `limit=0` returns the count
 without fetching a page. Aggregate `stats` are omitted by default. Supply

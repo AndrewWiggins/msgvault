@@ -164,7 +164,11 @@ func TestSearchAfterID(t *testing.T) {
 						return nil, nil
 					},
 				}
-				response := doGet(newTestServerWithEngine(t, engine), "/api/v1/search/"+route+"?q=needle&after_id=42&page_only="+pageOnly)
+				params := "?q=needle&after_id=42&page_only=" + pageOnly
+				if route == "fast" {
+					params += "&scope=body"
+				}
+				response := doGet(newTestServerWithEngine(t, engine), "/api/v1/search/"+route+params)
 				require.Equal(http.StatusOK, response.Code, response.Body.String())
 				var body map[string]json.RawMessage
 				require.NoError(json.Unmarshal(response.Body.Bytes(), &body))
@@ -180,10 +184,10 @@ func TestSearchAfterID(t *testing.T) {
 		}{
 			{"after_id=-1", "invalid_parameter"},
 			{"after_id=bad", "invalid_after_id"},
+			{"after_id=", "invalid_after_id"},
 			{"after_id=1.5", "invalid_after_id"},
 			{"after_id=9223372036854775808", "invalid_after_id"},
 			{"after_id=0&offset=1", "invalid_parameter"},
-			{"after_id=0&scope=body", "invalid_parameter"},
 		} {
 			t.Run(route+"/"+tc.params, func(t *testing.T) {
 				response := doGet(newTestServerWithEngine(t, &querytest.MockEngine{}), "/api/v1/search/"+route+"?q=needle&"+tc.params)
@@ -191,6 +195,15 @@ func TestSearchAfterID(t *testing.T) {
 				var body ErrorResponse
 				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
 				assert.Equal(t, tc.code, body.Error)
+			})
+		}
+		if route == "deep" {
+			t.Run("deep/body scope rejects cursor", func(t *testing.T) {
+				response := doGet(newTestServerWithEngine(t, &querytest.MockEngine{}), "/api/v1/search/deep?q=needle&after_id=0&scope=body")
+				assert.Equal(t, http.StatusBadRequest, response.Code)
+				var body ErrorResponse
+				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+				assert.Equal(t, "invalid_parameter", body.Error)
 			})
 		}
 	}

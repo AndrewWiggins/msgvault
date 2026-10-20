@@ -168,4 +168,31 @@ func TestStageDeletionThroughDaemonStagesEveryMatch(t *testing.T) {
 		saver := stage(t, map[string]any{"query": "bodyneedle"})
 		assert.Len(t, saver.manifest.GmailIDs, 150)
 	})
+	for _, queryStr := range []string{"subject:selectionmarker", "bodyneedle OR otherneedle"} {
+		t.Run("daemon ignores cursor/"+queryStr, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			server := api.NewServerWithOptions(api.ServerOptions{
+				Config: &config.Config{Server: config.ServerConfig{APIKey: "synthetic-owner-key"}},
+				Engine: query.NewEngine(st.DB(), st.IsPostgreSQL()), Store: st,
+				Logger: slog.New(slog.DiscardHandler),
+			})
+			// Older daemons ignore the cursor and omit its response echo.
+			oldDaemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				params := r.URL.Query()
+				params.Del("after_id")
+				r.URL.RawQuery = params.Encode()
+				server.Router().ServeHTTP(w, r)
+			}))
+			t.Cleanup(oldDaemon.Close)
+			adapter, err := daemonclient.NewEngine(daemonclient.Config{URL: oldDaemon.URL, APIKey: "synthetic-owner-key", AllowInsecure: true})
+			require.NoError(err)
+			t.Cleanup(func() { require.NoError(adapter.Close()) })
+			saver := &captureDeletionManifestSaver{}
+			h := &handlers{engine: adapter, manifestSaver: saver}
+			result := runToolExpectError(t, "stage_deletion", h.stageDeletion, map[string]any{"query": queryStr})
+			assert.Contains(resultText(t, result), "upgrade the daemon to a build that supports after_id search cursors")
+			assert.Nil(saver.manifest)
+		})
+	}
 }

@@ -2748,6 +2748,7 @@ func TestEngineSearchRequiresAfterIDEcho(t *testing.T) {
 				}
 				if tc.wantError {
 					require.Error(err)
+					require.ErrorIs(err, ErrSearchCursorUnsupported)
 					assert.Contains(err.Error(), "after_id")
 					assert.Contains(err.Error(), "upgrade")
 					assert.Nil(rows)

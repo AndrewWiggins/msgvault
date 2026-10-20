@@ -31089,7 +31089,7 @@ paths:
           name: page_only
           schema:
             type: boolean
-        - description: Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0 or scope=body
+        - description: Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0
           in: query
           name: after_id
           schema:

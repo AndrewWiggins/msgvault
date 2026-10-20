@@ -2476,6 +2476,9 @@ func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolRes
 			}
 		}
 		if err != nil {
+			if errors.Is(err, daemonclient.ErrSearchCursorUnsupported) {
+				err = &expectedHandlerError{message: err.Error()}
+			}
 			return dependencyError("search messages for deletion", err)
 		}
 

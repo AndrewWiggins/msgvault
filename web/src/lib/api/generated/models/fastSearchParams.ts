@@ -8,7 +8,7 @@ export type FastSearchParams = {
    */
   page_only?: boolean;
   /**
-   * Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0 or scope=body
+   * Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0
    */
   after_id?: number;
   /**
