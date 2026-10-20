@@ -14,7 +14,7 @@ import (
 func explainSearchPlan(t *testing.T, env *testEnv, q *search.Query) string {
 	t.Helper()
 	conditions, args, ftsJoin := env.Engine.buildSearchQueryParts(env.Ctx, q)
-	sqlText := searchResultsSQL(ftsJoin, strings.Join(conditions, " AND "), "m.sent_at DESC, m.id DESC")
+	sqlText := searchResultsSQL(ftsJoin, strings.Join(conditions, " AND "), defaultSearchOrderBy)
 	rows, err := env.DB.QueryContext(env.Ctx, "EXPLAIN QUERY PLAN "+sqlText, append(args, 50, 0)...)
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()

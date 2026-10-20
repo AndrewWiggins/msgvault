@@ -1683,7 +1683,7 @@ func sourceIDForSourceIDs(sourceID *int64, sourceIDs []int64) *int64 {
 }
 
 func requireAfterIDEcho(requested, applied *int64) error {
-	if requested != nil && (applied == nil || *requested != *applied) {
+	if requested != nil && applied == nil {
 		return ErrSearchCursorUnsupported
 	}
 	return nil

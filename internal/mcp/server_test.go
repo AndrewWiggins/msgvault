@@ -3454,54 +3454,46 @@ func TestStageDeletion(t *testing.T) {
 		assert.LessOrEqual(t, fetches, maxStageDeletionResults/stageDeletionPageSize+1)
 	})
 
-	t.Run("same label toggle during both walks stages every match", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-		matching := page(1, 600)
-		saver := &captureDeletionManifestSaver{}
-		h := &handlers{engine: &querytest.MockEngine{Accounts: accounts, SearchFastFunc: func(_ context.Context, _ *search.Query, f query.MessageFilter, limit, offset int) ([]query.MessageSummary, error) {
-			start := offset
-			if f.Pagination.AfterID != nil {
-				start = 0
+	for _, tc := range []struct {
+		name    string
+		restore bool
+	}{
+		{"same label toggle during both walks stages every match", true},
+		{"match removed between pages is refused without a batch", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			matching := page(1, 600)
+			saver := &captureDeletionManifestSaver{}
+			h := &handlers{engine: &querytest.MockEngine{Accounts: accounts, SearchFastFunc: func(_ context.Context, _ *search.Query, f query.MessageFilter, limit, _ int) ([]query.MessageSummary, error) {
+				require.NotNil(f.Pagination.AfterID)
+				start := 0
 				for start < len(matching) && matching[start].ID <= *f.Pagination.AfterID {
 					start++
 				}
-			}
-			rows := matching[min(start, len(matching)):min(start+limit, len(matching))]
-			if start == 0 {
-				matching = matching[1:]
+				rows := matching[start:min(start+limit, len(matching))]
+				if matching[0].ID == 1 {
+					matching = matching[1:]
+				} else if tc.restore {
+					matching = page(1, 600)
+				}
+				return rows, nil
+			}}, manifestSaver: saver}
+			args := map[string]any{"query": "label:X"}
+			if tc.restore {
+				resp := runTool[stageDeletionResponse](t, "stage_deletion", h.stageDeletion, args)
+				assert.Equal(600, resp.MessageCount)
+				require.NotNil(saver.manifest)
+				assert.Len(saver.manifest.GmailIDs, 600)
+				assert.Contains(saver.manifest.GmailIDs, "gmail-501")
 			} else {
-				matching = page(1, 600)
+				result := runToolExpectError(t, "stage_deletion", h.stageDeletion, args)
+				assert.Contains(resultText(t, result), "archive changed during staging")
+				assert.Nil(saver.manifest)
 			}
-			return rows, nil
-		}}, manifestSaver: saver}
-		resp := runTool[stageDeletionResponse](t, "stage_deletion", h.stageDeletion, map[string]any{"query": "label:X"})
-		assert.Equal(600, resp.MessageCount)
-		require.NotNil(saver.manifest)
-		assert.Len(saver.manifest.GmailIDs, 600)
-		assert.Contains(saver.manifest.GmailIDs, "gmail-501")
-	})
-
-	t.Run("match removed between pages is refused without a batch", func(t *testing.T) {
-		// A sync drops the label from message 1 after page one. The second
-		// walk must detect that the match disappeared.
-		matching := page(1, 600)
-		saver := &captureDeletionManifestSaver{}
-		h := &handlers{engine: &querytest.MockEngine{Accounts: accounts, SearchFastFunc: func(_ context.Context, _ *search.Query, f query.MessageFilter, limit, _ int) ([]query.MessageSummary, error) {
-			start := 0
-			for start < len(matching) && matching[start].ID <= *f.Pagination.AfterID {
-				start++
-			}
-			rows := matching[start:min(start+limit, len(matching))]
-			if matching[0].ID == 1 {
-				matching = matching[1:]
-			}
-			return rows, nil
-		}}, manifestSaver: saver}
-		result := runToolExpectError(t, "stage_deletion", h.stageDeletion, map[string]any{"query": "label:X"})
-		assert.Contains(t, resultText(t, result), "archive changed during staging")
-		assert.Nil(t, saver.manifest)
-	})
+		})
+	}
 }
 
 func TestStageDeletionRejectsInvalidOrEmptyParsedQuery(t *testing.T) {

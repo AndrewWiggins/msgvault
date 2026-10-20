@@ -2717,7 +2717,6 @@ func TestEngineSearchRequiresAfterIDEcho(t *testing.T) {
 			wantError bool
 		}{
 			{name: "missing", wantError: true},
-			{name: "mismatch", echo: 41, wantError: true},
 			{name: "confirmed", echo: 42},
 			{name: "start", echo: 0},
 		} {

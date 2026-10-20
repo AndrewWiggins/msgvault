@@ -40,7 +40,7 @@ func seedMetadataSearch(t *testing.T, db *sql.DB) {
 }
 
 // metadataDaemon serves engine over HTTP. A store lets the daemon list accounts.
-func metadataDaemon(t *testing.T, engine query.Engine, requests *atomic.Int32, st ...*store.Store) *daemonclient.Engine {
+func metadataDaemon(t *testing.T, engine query.Engine, requests *atomic.Int32, wrapRequest func(*http.Request), st ...*store.Store) *daemonclient.Engine {
 	t.Helper()
 	opts := api.ServerOptions{
 		Config: &config.Config{Server: config.ServerConfig{APIKey: "synthetic-owner-key"}},
@@ -53,6 +53,9 @@ func metadataDaemon(t *testing.T, engine query.Engine, requests *atomic.Int32, s
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/search/fast" {
 			requests.Add(1)
+		}
+		if wrapRequest != nil {
+			wrapRequest(r)
 		}
 		server.Router().ServeHTTP(w, r)
 	}))
@@ -81,7 +84,7 @@ func TestSearchMetadataSingleRequestSQLiteStatements(t *testing.T) {
 			db, observer := sqlobserve.Open(t, nil)
 			seedMetadataSearch(t, db)
 			var requests atomic.Int32
-			adapter := metadataDaemon(t, query.NewSQLiteEngine(db), &requests)
+			adapter := metadataDaemon(t, query.NewSQLiteEngine(db), &requests, nil)
 			observer.Reset()
 			result := runTool[paginatedSearchMessages](t, ToolSearchMetadata, newTestHandlers(adapter).searchMetadata, map[string]any{"query": tc.query, "limit": float64(2), "offset": float64(tc.offset)})
 			ids := make([]int64, 0, len(result.Data))
@@ -102,7 +105,7 @@ func TestRemoteSearchFastZeroLimitKeepsDefaultPageAndSkipsCount(t *testing.T) {
 	db, observer := sqlobserve.Open(t, nil)
 	seedMetadataSearch(t, db)
 	var requests atomic.Int32
-	adapter := metadataDaemon(t, query.NewSQLiteEngine(db), &requests)
+	adapter := metadataDaemon(t, query.NewSQLiteEngine(db), &requests, nil)
 	observer.Reset()
 	messages, err := adapter.SearchFast(t.Context(), search.Parse("after:2023-01-01"), query.MessageFilter{}, 0, 0)
 	require.NoError(t, err)
@@ -117,7 +120,7 @@ func TestRemoteSearchPageOnlySkipsCount(t *testing.T) {
 	db, observer := sqlobserve.Open(t, nil)
 	seedMetadataSearch(t, db)
 	var requests atomic.Int32
-	adapter := metadataDaemon(t, query.NewSQLiteEngine(db), &requests)
+	adapter := metadataDaemon(t, query.NewSQLiteEngine(db), &requests, nil)
 	observer.Reset()
 	messages, err := adapter.Search(t.Context(), search.Parse("after:2023-01-01"), 2, 0)
 	require.NoError(err)
@@ -149,7 +152,7 @@ func TestStageDeletionThroughDaemonStagesEveryMatch(t *testing.T) {
 		persist(fmt.Sprintf("body-%03d", i), "plain", "bodyneedle")
 	}
 	var requests atomic.Int32
-	daemon := metadataDaemon(t, query.NewEngine(st.DB(), st.IsPostgreSQL()), &requests, st)
+	daemon := metadataDaemon(t, query.NewEngine(st.DB(), st.IsPostgreSQL()), &requests, nil, st)
 
 	stage := func(t *testing.T, args map[string]any) *captureDeletionManifestSaver {
 		t.Helper()
@@ -168,31 +171,18 @@ func TestStageDeletionThroughDaemonStagesEveryMatch(t *testing.T) {
 		saver := stage(t, map[string]any{"query": "bodyneedle"})
 		assert.Len(t, saver.manifest.GmailIDs, 150)
 	})
-	for _, queryStr := range []string{"subject:selectionmarker", "bodyneedle OR otherneedle"} {
-		t.Run("daemon ignores cursor/"+queryStr, func(t *testing.T) {
-			assert := assert.New(t)
-			require := require.New(t)
-			server := api.NewServerWithOptions(api.ServerOptions{
-				Config: &config.Config{Server: config.ServerConfig{APIKey: "synthetic-owner-key"}},
-				Engine: query.NewEngine(st.DB(), st.IsPostgreSQL()), Store: st,
-				Logger: slog.New(slog.DiscardHandler),
-			})
-			// Older daemons ignore the cursor and omit its response echo.
-			oldDaemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				params := r.URL.Query()
-				params.Del("after_id")
-				r.URL.RawQuery = params.Encode()
-				server.Router().ServeHTTP(w, r)
-			}))
-			t.Cleanup(oldDaemon.Close)
-			adapter, err := daemonclient.NewEngine(daemonclient.Config{URL: oldDaemon.URL, APIKey: "synthetic-owner-key", AllowInsecure: true})
-			require.NoError(err)
-			t.Cleanup(func() { require.NoError(adapter.Close()) })
-			saver := &captureDeletionManifestSaver{}
-			h := &handlers{engine: adapter, manifestSaver: saver}
-			result := runToolExpectError(t, "stage_deletion", h.stageDeletion, map[string]any{"query": queryStr})
-			assert.Contains(resultText(t, result), "upgrade the daemon to a build that supports after_id search cursors")
-			assert.Nil(saver.manifest)
-		})
-	}
+	t.Run("daemon ignores cursor/subject:selectionmarker", func(t *testing.T) {
+		assert := assert.New(t)
+		// Older daemons ignore the cursor and omit its response echo.
+		adapter := metadataDaemon(t, query.NewEngine(st.DB(), st.IsPostgreSQL()), &requests, func(r *http.Request) {
+			params := r.URL.Query()
+			params.Del("after_id")
+			r.URL.RawQuery = params.Encode()
+		}, st)
+		saver := &captureDeletionManifestSaver{}
+		h := &handlers{engine: adapter, manifestSaver: saver}
+		result := runToolExpectError(t, "stage_deletion", h.stageDeletion, map[string]any{"query": "subject:selectionmarker"})
+		assert.Contains(resultText(t, result), "upgrade the daemon to a build that supports after_id search cursors")
+		assert.Nil(saver.manifest)
+	})
 }

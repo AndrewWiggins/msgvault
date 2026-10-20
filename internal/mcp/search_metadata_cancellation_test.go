@@ -43,7 +43,7 @@ func TestSearchMetadataHTTPDisconnectCancelsSQLite(t *testing.T) {
 			})
 			seedMetadataSearch(t, db)
 			var requests atomic.Int32
-			adapter := metadataDaemon(t, query.NewSQLiteEngine(db), &requests)
+			adapter := metadataDaemon(t, query.NewSQLiteEngine(db), &requests, nil)
 			sqlContexts := make(chan context.Context, 1)
 			observer.BeforeQuery = func(ctx context.Context, _ string) {
 				select {

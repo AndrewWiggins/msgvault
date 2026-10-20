@@ -2301,6 +2301,8 @@ func (e *SQLiteEngine) SearchFast(ctx context.Context, q *search.Query, filter M
 	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset, filter.Pagination.AfterID)
 }
 
+const defaultSearchOrderBy = "m.sent_at DESC, m.id DESC"
+
 // executeSearchQuery runs a search query built from conditions and the
 // optional FTS join, returning paginated MessageSummary results. Shared
 // by Search and SearchFast.
@@ -2309,7 +2311,7 @@ func (e *SQLiteEngine) executeSearchQuery(ctx context.Context, conditions []stri
 		limit = 100
 	}
 
-	orderBy := "m.sent_at DESC, m.id DESC"
+	orderBy := defaultSearchOrderBy
 	if afterID != nil {
 		conditions = append(conditions, "m.id > ?")
 		args = append(args, *afterID)
