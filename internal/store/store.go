@@ -1864,6 +1864,9 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 				); err != nil {
 					return err
 				}
+				if err := backfillMergedIMAPDrafts(ctx, tx); err != nil {
+					return fmt.Errorf("preserve previously merged IMAP drafts: %w", err)
+				}
 				_, err := tx.ExecContext(ctx, requeueActivityProjectionSQL(`
 					SELECT ae.message_id, 1, CURRENT_TIMESTAMP
 					FROM activity_events ae JOIN messages m ON m.id = ae.message_id
