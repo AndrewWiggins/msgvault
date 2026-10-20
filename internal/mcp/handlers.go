@@ -2366,6 +2366,7 @@ func searchAllForDeletion(page func(limit int, afterID int64) ([]query.MessageSu
 
 // walkDeletionPages advances by message ID until a short page or more than
 // maxStageDeletionResults rows.
+// Strict id > cursor ordering prevents duplicate rows, so no per-ID dedupe is needed.
 func walkDeletionPages(page func(limit int, afterID int64) ([]query.MessageSummary, error)) ([]query.MessageSummary, map[int64]bool, error) {
 	var results []query.MessageSummary
 	seen := make(map[int64]bool)

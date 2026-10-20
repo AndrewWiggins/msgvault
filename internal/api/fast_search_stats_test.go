@@ -165,9 +165,6 @@ func TestSearchAfterID(t *testing.T) {
 					},
 				}
 				params := "?q=needle&after_id=42&page_only=" + pageOnly
-				if route == "fast" {
-					params += "&scope=body"
-				}
 				response := doGet(newTestServerWithEngine(t, engine), "/api/v1/search/"+route+params)
 				require.Equal(http.StatusOK, response.Code, response.Body.String())
 				var body map[string]json.RawMessage

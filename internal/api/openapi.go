@@ -374,8 +374,8 @@ import (
 // owner source-maintenance requests. Existing source identifiers and account
 // requests remain valid.
 // 3.23.0 adds the Docbank attachment mirror routes, receipts and status states,
-// and page_only for fast and deep search.
-// Search pages also accept and echo an after_id cursor for ascending message-ID walks.
+// page_only for fast and deep search, and an after_id cursor that search pages
+// accept and echo for ascending message-ID walks.
 const APISchemaVersion = "3.23.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
