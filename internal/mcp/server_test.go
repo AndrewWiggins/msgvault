@@ -3426,9 +3426,9 @@ func TestStageDeletion(t *testing.T) {
 			args   map[string]any
 		}{
 			"query": {
-				&querytest.MockEngine{Accounts: accounts, SearchFastFunc: func(_ context.Context, _ *search.Query, _ query.MessageFilter, limit, offset int) ([]query.MessageSummary, error) {
+				&querytest.MockEngine{Accounts: accounts, SearchFastFunc: func(_ context.Context, _ *search.Query, f query.MessageFilter, limit, _ int) ([]query.MessageSummary, error) {
 					fetches++
-					return page(offset+1, limit), nil
+					return page(int(*f.Pagination.AfterID)+1, limit), nil
 				}},
 				map[string]any{"query": "from:news"},
 			},
@@ -3454,27 +3454,43 @@ func TestStageDeletion(t *testing.T) {
 		assert.LessOrEqual(t, fetches, maxStageDeletionResults/stageDeletionPageSize+1)
 	})
 
-	t.Run("message on two pages is staged once", func(t *testing.T) {
+	t.Run("same label toggle during both walks stages every match", func(t *testing.T) {
+		matching := page(1, 600)
 		saver := &captureDeletionManifestSaver{}
-		h := &handlers{engine: &querytest.MockEngine{Accounts: accounts, SearchFastFunc: func(_ context.Context, _ *search.Query, _ query.MessageFilter, limit, offset int) ([]query.MessageSummary, error) {
-			if offset == 0 {
-				return page(1, limit), nil
+		h := &handlers{engine: &querytest.MockEngine{Accounts: accounts, SearchFastFunc: func(_ context.Context, _ *search.Query, f query.MessageFilter, limit, offset int) ([]query.MessageSummary, error) {
+			start := offset
+			if f.Pagination.AfterID != nil {
+				start = 0
+				for start < len(matching) && matching[start].ID <= *f.Pagination.AfterID {
+					start++
+				}
 			}
-			return page(limit, 2), nil
+			rows := matching[min(start, len(matching)):min(start+limit, len(matching))]
+			if start == 0 {
+				matching = matching[1:]
+			} else {
+				matching = page(1, 600)
+			}
+			return rows, nil
 		}}, manifestSaver: saver}
-		resp := runTool[stageDeletionResponse](t, "stage_deletion", h.stageDeletion, map[string]any{"query": "from:news"})
-		assert.Equal(t, stageDeletionPageSize+1, resp.MessageCount)
+		resp := runTool[stageDeletionResponse](t, "stage_deletion", h.stageDeletion, map[string]any{"query": "label:X"})
+		assert.Equal(t, 600, resp.MessageCount)
 		require.NotNil(t, saver.manifest)
-		assert.Len(t, saver.manifest.GmailIDs, stageDeletionPageSize+1)
+		assert.Len(t, saver.manifest.GmailIDs, 600)
+		assert.Contains(t, saver.manifest.GmailIDs, "gmail-501")
 	})
 
 	t.Run("match removed between pages is refused without a batch", func(t *testing.T) {
-		// A sync drops the label from message 1 after page one, so page two
-		// starts at message 502 and message 501 is never returned.
+		// A sync drops the label from message 1 after page one. The second
+		// walk must detect that the match disappeared.
 		matching := page(1, 600)
 		saver := &captureDeletionManifestSaver{}
-		h := &handlers{engine: &querytest.MockEngine{Accounts: accounts, SearchFastFunc: func(_ context.Context, _ *search.Query, _ query.MessageFilter, limit, offset int) ([]query.MessageSummary, error) {
-			rows := matching[min(offset, len(matching)):min(offset+limit, len(matching))]
+		h := &handlers{engine: &querytest.MockEngine{Accounts: accounts, SearchFastFunc: func(_ context.Context, _ *search.Query, f query.MessageFilter, limit, _ int) ([]query.MessageSummary, error) {
+			start := 0
+			for start < len(matching) && matching[start].ID <= *f.Pagination.AfterID {
+				start++
+			}
+			rows := matching[start:min(start+limit, len(matching))]
 			if matching[0].ID == 1 {
 				matching = matching[1:]
 			}
@@ -4426,7 +4442,7 @@ func TestStageDeletionPipeORUsesSearchFast(t *testing.T) {
 	var searchCalled, fastCalled bool
 	engine := &querytest.MockEngine{
 		Accounts: []query.AccountInfo{{ID: 1, SourceType: "gmail", Identifier: "archive@example.com"}},
-		SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
+		SearchAfterIDFunc: func(context.Context, *search.Query, int64, int) ([]query.MessageSummary, error) {
 			searchCalled = true
 			return nil, nil
 		},
@@ -4459,7 +4475,7 @@ func TestStageDeletionPipeORUsesSearch(t *testing.T) {
 			{ID: 1, SourceType: "gmail", Identifier: "other@example.com"},
 			{ID: 2, SourceType: "gmail", Identifier: "archive@example.com"},
 		},
-		SearchFunc: func(_ context.Context, q *search.Query, _, _ int) ([]query.MessageSummary, error) {
+		SearchAfterIDFunc: func(_ context.Context, q *search.Query, _ int64, _ int) ([]query.MessageSummary, error) {
 			searchCalled = true
 			parsed = q
 			return []query.MessageSummary{

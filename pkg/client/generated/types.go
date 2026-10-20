@@ -3154,6 +3154,7 @@ func (d DecidePersonMergeCandidateRequest) Validate() error {
 }
 
 type DeepSearchResponse struct {
+	AfterID      *int64              `json:"after_id,omitempty"`
 	BodyContexts []BodySearchContext `json:"body_contexts,omitempty"`
 	Count        int64               `json:"count"`
 	HasMore      bool                `json:"has_more"`
@@ -13626,6 +13627,7 @@ func (s SearchCoverageResponse) Validate() error {
 }
 
 type SearchFastResponse struct {
+	AfterID          *int64              `json:"after_id,omitempty"`
 	AppliedSourceIds []int64             `json:"applied_source_ids,omitempty"`
 	IndexState       *string             `json:"index_state,omitzero"`
 	Messages         []MessageSummary    `json:"messages" validate:"required"`

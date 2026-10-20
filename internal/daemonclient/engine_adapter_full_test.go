@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -2706,4 +2707,54 @@ func TestEngineListVirtualAccountsFailsWhenCatalogUnavailable(t *testing.T) {
 	})
 	_, err := NewEngineAdapter(store).ListVirtualAccounts(context.Background())
 	require.ErrorIs(t, err, errVirtualAccountsUnavailable, "an unread catalog is not an empty one")
+}
+
+func TestEngineSearchRequiresAfterIDEcho(t *testing.T) {
+	for _, mode := range []string{"fast", "deep"} {
+		for _, tc := range []struct {
+			name      string
+			echo      any
+			wantError bool
+		}{
+			{name: "missing", wantError: true},
+			{name: "mismatch", echo: 41, wantError: true},
+			{name: "confirmed", echo: 42},
+			{name: "start", echo: 0},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				afterID := int64(42)
+				if tc.name == "start" {
+					afterID = 0
+				}
+				store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, "/api/v1/search/"+mode, r.URL.Path)
+					assert.Equal(t, strconv.FormatInt(afterID, 10), r.URL.Query().Get("after_id"))
+					assert.Equal(t, "true", r.URL.Query().Get("page_only"))
+					response := map[string]any{"query": "needle", "messages": []map[string]any{{"id": 43}}, "total_count": -1}
+					if tc.echo != nil {
+						response["after_id"] = tc.echo
+					}
+					writeJSONResponse(t, w, response)
+				})
+				engine := NewEngineAdapter(store)
+				var rows []query.MessageSummary
+				var err error
+				if mode == "fast" {
+					rows, err = engine.SearchFast(t.Context(), search.Parse("needle"), query.MessageFilter{Pagination: query.Pagination{AfterID: &afterID}}, 10, 0)
+				} else {
+					rows, err = engine.SearchAfterID(t.Context(), search.Parse("needle"), afterID, 10)
+				}
+				if tc.wantError {
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), "after_id")
+					assert.Contains(t, err.Error(), "upgrade")
+					assert.Nil(t, rows)
+				} else {
+					require.NoError(t, err)
+					require.Len(t, rows, 1)
+					assert.Equal(t, int64(43), rows[0].ID)
+				}
+			})
+		}
+	}
 }

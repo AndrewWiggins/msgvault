@@ -4901,3 +4901,29 @@ func TestDuckDBFilenameFilterParquet(t *testing.T) {
 	require.NoError(err)
 	assertAggregateCounts(t, agg, map[string]int64{"alice@example.com": 1})
 }
+
+func TestSearchFastWithStats_AfterID(t *testing.T) {
+	engine := newParquetEngine(t)
+	q := search.Parse("Hello")
+	var ids []int64
+	var cacheSeq uint64
+	for afterID := int64(0); ; {
+		result, err := engine.SearchFastWithStats(t.Context(), q, "Hello",
+			MessageFilter{Pagination: Pagination{AfterID: &afterID}}, ViewSenders, 1, 0)
+		require.NoError(t, err)
+		if cacheSeq == 0 {
+			cacheSeq = engine.tempTableSeq.Load()
+		} else {
+			assert.Equal(t, cacheSeq, engine.tempTableSeq.Load())
+		}
+		if len(result.Messages) == 0 {
+			assert.Equal(t, result.TotalCount, int64(len(ids)))
+			break
+		}
+		require.Len(t, result.Messages, 1)
+		require.Greater(t, result.Messages[0].ID, afterID)
+		afterID = result.Messages[0].ID
+		ids = append(ids, afterID)
+	}
+	require.NotEmpty(t, ids)
+}

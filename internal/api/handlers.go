@@ -280,6 +280,7 @@ type GmailIDsResponse struct {
 }
 
 type DeepSearchResponse struct {
+	AfterID      *int64              `json:"after_id,omitempty"`
 	IndexState   string              `json:"index_state,omitempty"`
 	Query        string              `json:"query"`
 	Scope        string              `json:"scope,omitempty"`
@@ -2195,6 +2196,7 @@ type TotalStatsResponse struct {
 
 // SearchFastResponse represents fast search results with stats.
 type SearchFastResponse struct {
+	AfterID          *int64              `json:"after_id,omitempty"`
 	IndexState       string              `json:"index_state,omitempty"`
 	Query            string              `json:"query"`
 	Messages         []MessageSummary    `json:"messages"`
@@ -3776,6 +3778,8 @@ func normalizeSourceIDs(ids []int64) []int64 {
 	return slices.Compact(normalized)
 }
 
+const searchScopeBody = "body"
+
 // handleFastSearch performs fast metadata search (subject, sender, recipient).
 // GET /api/v1/search/fast?q=invoice&offset=0&limit=100.
 func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
@@ -3795,6 +3799,18 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.rejectBadParam(w, err)
 		return
+	}
+	afterID, hasAfterID, err := queryInt64(r, "after_id")
+	if err != nil {
+		s.rejectBadParam(w, err)
+		return
+	}
+	if hasAfterID {
+		if afterID < 0 || filter.Pagination.Offset > 0 || r.URL.Query().Get("scope") == searchScopeBody {
+			writeError(w, http.StatusBadRequest, "invalid_parameter", "after_id must be nonnegative and cannot be combined with offset > 0 or scope=body")
+			return
+		}
+		filter.Pagination.AfterID = &afterID
 	}
 	q := search.ParseOR(queryStr)
 	if err := q.Err(); err != nil {
@@ -3862,6 +3878,7 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, SearchFastResponse{
+		AfterID:          filter.Pagination.AfterID,
 		IndexState:       indexState,
 		Query:            queryStr,
 		Messages:         summaries,
@@ -3887,7 +3904,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := r.URL.Query().Get("scope")
-	if scope != "" && scope != "body" {
+	if scope != "" && scope != searchScopeBody {
 		writeError(w, http.StatusBadRequest, "invalid_scope", "Invalid search scope. Must be 'body' or omitted")
 		return
 	}
@@ -3902,12 +3919,24 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		s.rejectBadParam(w, err)
 		return
 	}
-	q := search.ParseWithOR(queryStr, scope != "body")
+	afterID, hasAfterID, err := queryInt64(r, "after_id")
+	if err != nil {
+		s.rejectBadParam(w, err)
+		return
+	}
+	if hasAfterID {
+		if afterID < 0 || filter.Pagination.Offset > 0 || r.URL.Query().Get("scope") == searchScopeBody {
+			writeError(w, http.StatusBadRequest, "invalid_parameter", "after_id must be nonnegative and cannot be combined with offset > 0 or scope=body")
+			return
+		}
+		filter.Pagination.AfterID = &afterID
+	}
+	q := search.ParseWithOR(queryStr, scope != searchScopeBody)
 	if err := q.Err(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
 		return
 	}
-	if scope == "body" && len(q.TextTerms) == 0 {
+	if scope == searchScopeBody && len(q.TextTerms) == 0 {
 		writeError(w, http.StatusBadRequest, "missing_free_text",
 			"Body-scoped search requires at least one free-text term")
 		return
@@ -3921,7 +3950,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 	// Exact body-only search rejects view filters whose exact MessageFilter
 	// semantics cannot be preserved through search.Query. Generic Deep search
 	// below keeps the complete filter independent from user-entered operators.
-	if scope == "body" && (filter.Sender != "" || filter.SenderName != "" ||
+	if scope == searchScopeBody && (filter.Sender != "" || filter.SenderName != "" ||
 		filter.Recipient != "" || filter.RecipientName != "" ||
 		filter.Domain != "" || filter.Label != "" ||
 		filter.TimeRange.Period != "" || filter.HasEmptyTargets() ||
@@ -3948,7 +3977,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 	var messages []query.MessageSummary
 	var totalCount int64
 	var stats *query.TotalStats
-	if scope == "body" {
+	if scope == searchScopeBody {
 		merged := query.MergeFilterIntoQuery(q, filter)
 		if filter.HideDeletedFromSource {
 			merged.DeletionScope = search.DeletionScopeActive
@@ -3993,11 +4022,11 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		if s.writeIfContextError(w, err) {
 			return
 		}
-		if scope == "body" && errors.Is(err, query.ErrMessageBodySearchInvalidQuery) {
+		if scope == searchScopeBody && errors.Is(err, query.ErrMessageBodySearchInvalidQuery) {
 			writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
 			return
 		}
-		if scope == "body" && (errors.Is(err, query.ErrMessageBodySearchUnavailable) ||
+		if scope == searchScopeBody && (errors.Is(err, query.ErrMessageBodySearchUnavailable) ||
 			errors.Is(err, query.ErrMessageBodySearchIndexStale)) {
 			writeError(w, http.StatusServiceUnavailable, "body_search_index_unavailable", err.Error())
 			return
@@ -4013,13 +4042,13 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if pageOnly {
 		totalCount = -1
-	} else if scope == "body" {
+	} else if scope == searchScopeBody {
 		if hasMore || (offset > 0 && len(messages) == 0) {
 			totalCount = -1
 		} else {
 			totalCount = int64(offset + len(messages))
 		}
-	} else if totalCount >= 0 {
+	} else if totalCount >= 0 && !hasAfterID {
 		hasMore = totalCount > int64(offset+len(messages))
 	}
 
@@ -4028,7 +4057,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		summaries[i] = toMessageSummaryFromQuery(m)
 	}
 	var bodyContexts []BodySearchContext
-	if scope == "body" {
+	if scope == searchScopeBody {
 		bodyContexts = make([]BodySearchContext, len(messages))
 		for i, message := range messages {
 			bodyContexts[i] = toBodySearchContext(message)
@@ -4036,6 +4065,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, DeepSearchResponse{
+		AfterID:      filter.Pagination.AfterID,
 		IndexState:   agentIndexState(r),
 		Query:        queryStr,
 		Scope:        scope,

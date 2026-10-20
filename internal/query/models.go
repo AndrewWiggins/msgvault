@@ -279,8 +279,10 @@ type MessageFilter struct {
 	Sorting MessageSorting
 }
 
-// Pagination specifies limit and offset for paginated queries.
+// Pagination specifies how to page query results.
 type Pagination struct {
+	// AfterID selects IDs above the cursor in ascending ID order.
+	AfterID *int64
 	// PageOnly skips the count and stats in the SQLite/PostgreSQL engine.
 	// DuckDB keeps its cheap count over its cached match table.
 	// The API handler reports TotalCount as -1 either way.

@@ -148,3 +148,55 @@ func assertDisjointAndComplete(t *testing.T, want map[int64]struct{}, got []int6
 		assert.True(t, ok, "expected id %d missing from paged results (row skipped)", id)
 	}
 }
+
+func TestSearchPaginationAfterID(t *testing.T) {
+	for _, mode := range []string{"fast", "deep", "deep page only"} {
+		t.Run(mode, func(t *testing.T) {
+			st := testutil.NewTestStore(t)
+			src, want := seedPaginationStabilityFixture(t, st)
+			eng := query.NewEngine(st.DB(), st.IsPostgreSQL())
+			q := search.Parse("subject:" + paginationStabilitySubjectTag)
+			filter := query.MessageFilter{SourceID: &src.ID}
+			var seen []int64
+			for afterID := int64(0); ; {
+				filter.Pagination.AfterID = &afterID
+				var rows []query.MessageSummary
+				if mode == "deep page only" {
+					var err error
+					rows, err = eng.SearchDeep(t.Context(), q, filter, 1, 0)
+					require.NoError(t, err)
+				} else {
+					var result *query.SearchFastResult
+					var err error
+					if mode == "fast" {
+						result, err = eng.SearchFastWithStats(t.Context(), q, search.Format(q), filter, query.ViewSenders, 1, 0)
+					} else {
+						result, err = eng.SearchDeepWithStats(t.Context(), q, filter, 1, 0)
+					}
+					require.NoError(t, err)
+					wantCount := int64(3)
+					if afterID > 0 {
+						wantCount = 2
+					}
+					assert.Equal(t, wantCount, result.TotalCount)
+					require.NotNil(t, result.Stats)
+					assert.Equal(t, wantCount, result.Stats.MessageCount)
+					rows = result.Messages
+				}
+				if len(rows) == 0 {
+					break
+				}
+				require.Len(t, rows, 1)
+				require.Greater(t, rows[0].ID, afterID)
+				afterID = rows[0].ID
+				seen = append(seen, afterID)
+				if len(seen) == 1 {
+					// Removing an earlier match must leave the next page intact.
+					_, err := st.DB().Exec(st.Rebind("UPDATE messages SET subject = 'removed' WHERE id = ?"), afterID)
+					require.NoError(t, err)
+				}
+			}
+			assertDisjointAndComplete(t, want, seen)
+		})
+	}
+}

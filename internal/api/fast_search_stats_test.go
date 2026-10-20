@@ -139,3 +139,44 @@ func TestHandleDeepSearchPageOnly(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchAfterID(t *testing.T) {
+	for _, route := range []string{"fast", "deep"} {
+		for _, pageOnly := range []string{"false", "true"} {
+			t.Run(route+"/page_only="+pageOnly, func(t *testing.T) {
+				check := func(f query.MessageFilter) {
+					require.NotNil(t, f.Pagination.AfterID)
+					assert.Equal(t, int64(42), *f.Pagination.AfterID)
+				}
+				engine := &querytest.MockEngine{
+					SearchFastWithStatsFunc: func(_ context.Context, _ *search.Query, _ string, f query.MessageFilter, _ query.ViewType, _, _ int) (*query.SearchFastResult, error) {
+						check(f)
+						return &query.SearchFastResult{TotalCount: 100}, nil
+					},
+					SearchDeepWithStatsFunc: func(_ context.Context, _ *search.Query, f query.MessageFilter, _, _ int) (*query.SearchFastResult, error) {
+						check(f)
+						return &query.SearchFastResult{TotalCount: 100}, nil
+					},
+					SearchDeepFunc: func(_ context.Context, _ *search.Query, f query.MessageFilter, _, _ int) ([]query.MessageSummary, error) {
+						check(f)
+						return nil, nil
+					},
+				}
+				response := doGet(newTestServerWithEngine(t, engine), "/api/v1/search/"+route+"?q=needle&after_id=42&page_only="+pageOnly)
+				require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+				var body map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+				assert.JSONEq(t, "42", string(body["after_id"]))
+				if route == "deep" {
+					assert.JSONEq(t, "false", string(body["has_more"]))
+				}
+			})
+		}
+		for _, params := range []string{"after_id=-1", "after_id=bad", "after_id=0&offset=1", "after_id=0&scope=body"} {
+			t.Run(route+"/"+params, func(t *testing.T) {
+				response := doGet(newTestServerWithEngine(t, &querytest.MockEngine{}), "/api/v1/search/"+route+"?q=needle&"+params)
+				assert.Equal(t, http.StatusBadRequest, response.Code)
+			})
+		}
+	}
+}

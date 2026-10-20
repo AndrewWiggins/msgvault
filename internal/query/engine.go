@@ -228,6 +228,11 @@ type PeopleInboxAnalyzer interface {
 	ResolveCanonicalParticipant(ctx context.Context, participantID int64) (int64, error)
 }
 
+// IDPageSearcher pages search matches in ascending message-ID order.
+type IDPageSearcher interface {
+	SearchAfterID(ctx context.Context, q *search.Query, afterID int64, limit int) ([]MessageSummary, error)
+}
+
 // MessageBodySearcher is an optional capability for exact full-text search of
 // message bodies. It is deliberately separate from Engine so generic Search
 // retains its composite subject/body/participant semantics.

@@ -1222,6 +1222,9 @@ type DeepSearchQuery struct {
 	// PageOnly Return only the page with total_count=-1 and no stats
 	PageOnly *bool `json:"page_only,omitempty"`
 
+	// AfterID Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0 or scope=body
+	AfterID *int64 `json:"after_id,omitempty"`
+
 	// Q Search query; full text accepts standalone pipe-separated OR alternatives
 	Q string `json:"q" validate:"required"`
 
@@ -1332,6 +1335,9 @@ func (s SearchMessagesByDomainsQuery) Validate() error {
 type FastSearchQuery struct {
 	// PageOnly Return only the page with total_count=-1 and no stats
 	PageOnly *bool `json:"page_only,omitempty"`
+
+	// AfterID Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0 or scope=body
+	AfterID *int64 `json:"after_id,omitempty"`
 
 	// Q Search query; full text accepts standalone pipe-separated OR alternatives
 	Q string `json:"q" validate:"required"`

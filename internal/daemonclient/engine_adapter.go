@@ -64,6 +64,7 @@ var _ query.Engine = (*Engine)(nil)
 var _ query.TextEngine = (*Engine)(nil)
 var _ query.CollectionScopeLister = (*Engine)(nil)
 var _ query.MessageBodySearcher = (*Engine)(nil)
+var _ query.IDPageSearcher = (*Engine)(nil)
 var _ query.SemanticMessageSearcher = (*Engine)(nil)
 var _ query.DeletionTargetSearchResolver = (*Engine)(nil)
 var _ query.DeletionTargetAggregateSearchResolver = (*Engine)(nil)
@@ -446,6 +447,7 @@ func fastSearchQuery(queryStr string, filter query.MessageFilter, statsGroupBy q
 	return &generated.FastSearchQuery{
 		Q:               queryStr,
 		PageOnly:        optionalBool(filter.Pagination.PageOnly),
+		AfterID:         filter.Pagination.AfterID,
 		ViewType:        viewType,
 		Sender:          fields.Sender,
 		SenderName:      fields.SenderName,
@@ -978,6 +980,15 @@ func (e *Engine) GetAttachmentsByHash(context.Context, string) ([]query.Attachme
 
 // Search performs full-text search including message body.
 func (e *Engine) Search(ctx context.Context, q *search.Query, limit, offset int) ([]query.MessageSummary, error) {
+	return e.search(ctx, q, limit, offset, nil)
+}
+
+// SearchAfterID keeps account scopes while requesting message-ID pages.
+func (e *Engine) SearchAfterID(ctx context.Context, q *search.Query, afterID int64, limit int) ([]query.MessageSummary, error) {
+	return e.search(ctx, q, limit, 0, &afterID)
+}
+
+func (e *Engine) search(ctx context.Context, q *search.Query, limit, offset int, afterID *int64) ([]query.MessageSummary, error) {
 	if err := validateParsedSearchQuery(q); err != nil {
 		return nil, err
 	}
@@ -998,6 +1009,7 @@ func (e *Engine) Search(ctx context.Context, q *search.Query, limit, offset int)
 		return nil, err
 	}
 	queryParams.PageOnly = optionalBool(true)
+	queryParams.AfterID = afterID
 	queryParams.AccountScopes = encodedAccountScopes(scoped.AccountScopes)
 
 	resp, err := APIResponse(e.store, func(client *apiclient.Client) (*generated.DeepSearchResp, error) {
@@ -1006,6 +1018,9 @@ func (e *Engine) Search(ctx context.Context, q *search.Query, limit, offset int)
 		})
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := requireAfterIDEcho(afterID, resp.JSON200.AfterID); err != nil {
 		return nil, err
 	}
 	return e.store.messageSummariesWithURLs(resp.JSON200.Messages), nil
@@ -1209,6 +1224,9 @@ func (e *Engine) SearchFastWithStats(ctx context.Context, q *search.Query, query
 		return nil, err
 	}
 	if err := requireAppliedSourceIDs(filter.SourceIDs, resp.JSON200.AppliedSourceIds, "fast-search"); err != nil {
+		return nil, err
+	}
+	if err := requireAfterIDEcho(filter.Pagination.AfterID, resp.JSON200.AfterID); err != nil {
 		return nil, err
 	}
 	return &query.SearchFastResult{
@@ -1659,6 +1677,13 @@ func sourceIDForSourceIDs(sourceID *int64, sourceIDs []int64) *int64 {
 		return nil
 	}
 	return sourceID
+}
+
+func requireAfterIDEcho(requested, applied *int64) error {
+	if requested != nil && (applied == nil || *requested != *applied) {
+		return errors.New("daemon did not confirm after_id; upgrade the daemon to API schema 3.23.0 or newer")
+	}
+	return nil
 }
 
 func requireAppliedSourceIDs(requested, applied []int64, surface string) error {

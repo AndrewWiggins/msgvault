@@ -34,6 +34,7 @@ type MockEngine struct {
 
 	// Optional overrides — set these to customise behavior per-test.
 	SearchFastFunc                          func(context.Context, *search.Query, query.MessageFilter, int, int) ([]query.MessageSummary, error)
+	SearchAfterIDFunc                       func(context.Context, *search.Query, int64, int) ([]query.MessageSummary, error)
 	SearchFunc                              func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error)
 	SearchDeepFunc                          func(context.Context, *search.Query, query.MessageFilter, int, int) ([]query.MessageSummary, error)
 	SearchDeepWithStatsFunc                 func(context.Context, *search.Query, query.MessageFilter, int, int) (*query.SearchFastResult, error)
@@ -165,6 +166,22 @@ func (m *MockEngine) Search(ctx context.Context, q *search.Query, limit, offset 
 		return m.SearchFunc(ctx, q, limit, offset)
 	}
 	return m.SearchResults, nil
+}
+
+func (m *MockEngine) SearchAfterID(ctx context.Context, q *search.Query, afterID int64, limit int) ([]query.MessageSummary, error) {
+	if m.SearchAfterIDFunc != nil {
+		return m.SearchAfterIDFunc(ctx, q, afterID, limit)
+	}
+	var rows []query.MessageSummary
+	for _, row := range m.SearchResults {
+		if row.ID > afterID {
+			rows = append(rows, row)
+			if len(rows) == limit {
+				break
+			}
+		}
+	}
+	return rows, nil
 }
 
 func (m *MockEngine) SearchDeep(

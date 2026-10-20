@@ -1914,7 +1914,7 @@ func (e *SQLiteEngine) SearchByDomains(ctx context.Context, domains []string, af
 		limit = 1000
 	}
 
-	return e.executeSearchQuery(ctx, conditions, args, "", limit, offset)
+	return e.executeSearchQuery(ctx, conditions, args, "", limit, offset, nil)
 }
 
 // Search performs a Gmail-style search query.
@@ -2107,7 +2107,13 @@ func appendSQLiteAddressCondition(
 
 func (e *SQLiteEngine) Search(ctx context.Context, q *search.Query, limit, offset int) ([]MessageSummary, error) {
 	conditions, args, ftsJoin := e.buildSearchQueryParts(ctx, q)
-	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset)
+	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset, nil)
+}
+
+// SearchAfterID preserves query scope while paging by message ID.
+func (e *SQLiteEngine) SearchAfterID(ctx context.Context, q *search.Query, afterID int64, limit int) ([]MessageSummary, error) {
+	conditions, args, ftsJoin := e.buildSearchQueryParts(ctx, q)
+	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, 0, &afterID)
 }
 
 // SearchMessageBodies performs exact body-only full-text search and uses the
@@ -2143,7 +2149,7 @@ func (e *SQLiteEngine) SearchMessageBodies(ctx context.Context, q *search.Query,
 	if ftsJoin == "" {
 		ftsJoin = e.dialect.FTSJoin()
 	}
-	results, err := e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset)
+	results, err := e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2270,7 +2276,7 @@ func (e *SQLiteEngine) SearchDeep(
 	ctx context.Context, searchQuery *search.Query, filter MessageFilter, limit, offset int,
 ) ([]MessageSummary, error) {
 	conditions, args, ftsJoin := e.buildFilteredDeepSearchQueryParts(ctx, searchQuery, filter)
-	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset)
+	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset, filter.Pagination.AfterID)
 }
 
 // SearchDeepWithStats builds the body-aware predicate once and reuses it for
@@ -2279,7 +2285,7 @@ func (e *SQLiteEngine) SearchDeepWithStats(
 	ctx context.Context, searchQuery *search.Query, filter MessageFilter, limit, offset int,
 ) (*SearchFastResult, error) {
 	conditions, args, ftsJoin := e.buildFilteredDeepSearchQueryParts(ctx, searchQuery, filter)
-	results, err := e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset)
+	results, err := e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset, filter.Pagination.AfterID)
 	if err != nil {
 		return nil, err
 	}
@@ -2298,17 +2304,23 @@ func (e *SQLiteEngine) SearchDeepWithStats(
 // the query (drill-down filters, hide-deleted, etc.).
 func (e *SQLiteEngine) SearchFast(ctx context.Context, q *search.Query, filter MessageFilter, limit, offset int) ([]MessageSummary, error) {
 	conditions, args, ftsJoin := e.buildFilteredMetadataSearchQueryParts(ctx, q, filter)
-	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset)
+	return e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset, filter.Pagination.AfterID)
 }
 
 // executeSearchQuery runs a search query built from conditions and the
 // optional FTS join, returning paginated MessageSummary results. Shared
 // by Search and SearchFast.
-func (e *SQLiteEngine) executeSearchQuery(ctx context.Context, conditions []string, args []any, ftsJoin string, limit, offset int) ([]MessageSummary, error) {
+func (e *SQLiteEngine) executeSearchQuery(ctx context.Context, conditions []string, args []any, ftsJoin string, limit, offset int, afterID *int64) ([]MessageSummary, error) {
 	if limit == 0 {
 		limit = 100
 	}
 
+	orderBy := "m.sent_at DESC, m.id DESC"
+	if afterID != nil {
+		conditions = append(conditions, "m.id > ?")
+		args = append(args, *afterID)
+		orderBy = "m.id ASC"
+	}
 	whereClause := strings.Join(conditions, " AND ")
 	if whereClause == "" {
 		whereClause = "1=1"
@@ -2316,7 +2328,7 @@ func (e *SQLiteEngine) executeSearchQuery(ctx context.Context, conditions []stri
 
 	// Filter conditions do not add outer joins, so they cannot multiply result
 	// rows. The sender join selects one row per message.
-	query := searchResultsSQL(ftsJoin, whereClause)
+	query := searchResultsSQL(ftsJoin, whereClause, orderBy)
 	args = append(args, limit, offset)
 
 	rows, err := e.queryContext(ctx, query, args...)
@@ -2376,7 +2388,7 @@ func (e *SQLiteEngine) executeSearchQuery(ctx context.Context, conditions []stri
 
 // searchResultsSQL is the statement executeSearchQuery runs; tests EXPLAIN
 // it to pin the plan.
-func searchResultsSQL(ftsJoin, whereClause string) string {
+func searchResultsSQL(ftsJoin, whereClause, orderBy string) string {
 	return fmt.Sprintf(`
 		SELECT
 			m.id,
@@ -2401,9 +2413,9 @@ func searchResultsSQL(ftsJoin, whereClause string) string {
 		LEFT JOIN conversations conv ON conv.id = m.conversation_id
 		%s
 		WHERE %s
-		ORDER BY m.sent_at DESC, m.id DESC
+		ORDER BY %s
 		LIMIT ? OFFSET ?
-	`, sqliteSenderNameExpr, sqliteSenderJoin, ftsJoin, whereClause)
+	`, sqliteSenderNameExpr, sqliteSenderJoin, ftsJoin, whereClause, orderBy)
 }
 
 // MergeFilterIntoQuery combines a MessageFilter context with a search.Query.
@@ -2687,7 +2699,7 @@ func (e *SQLiteEngine) SearchFastWithStats(ctx context.Context, q *search.Query,
 	var results []MessageSummary
 	if limit != 0 {
 		var err error
-		results, err = e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset)
+		results, err = e.executeSearchQuery(ctx, conditions, args, ftsJoin, limit, offset, filter.Pagination.AfterID)
 		if err != nil {
 			return nil, err
 		}

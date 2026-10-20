@@ -2344,9 +2344,8 @@ const maxStageDeletionResults = 100000
 const stageDeletionPageSize = 500
 
 // searchAllForDeletion walks the search pages twice and refuses when the walks
-// differ: a row that stops matching between page requests shifts later offsets
-// and can hide a message that matched throughout.
-func searchAllForDeletion(page func(limit, offset int) ([]query.MessageSummary, error)) ([]query.MessageSummary, error) {
+// differ because rows started or stopped matching during staging.
+func searchAllForDeletion(page func(limit int, afterID int64) ([]query.MessageSummary, error)) ([]query.MessageSummary, error) {
 	first, ids, err := walkDeletionPages(page)
 	if err != nil || len(first) > maxStageDeletionResults {
 		return first, err
@@ -2365,25 +2364,24 @@ func searchAllForDeletion(page func(limit, offset int) ([]query.MessageSummary, 
 	return first, nil
 }
 
-// walkDeletionPages fetches search pages at increasing offsets, keeping each
-// message once, until a short page or more than maxStageDeletionResults rows.
-func walkDeletionPages(page func(limit, offset int) ([]query.MessageSummary, error)) ([]query.MessageSummary, map[int64]bool, error) {
+// walkDeletionPages advances by message ID until a short page or more than
+// maxStageDeletionResults rows.
+func walkDeletionPages(page func(limit int, afterID int64) ([]query.MessageSummary, error)) ([]query.MessageSummary, map[int64]bool, error) {
 	var results []query.MessageSummary
 	seen := make(map[int64]bool)
-	for offset := 0; len(results) <= maxStageDeletionResults; offset += stageDeletionPageSize {
-		rows, err := page(stageDeletionPageSize, offset)
+	for afterID := int64(0); len(results) <= maxStageDeletionResults; {
+		rows, err := page(stageDeletionPageSize, afterID)
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, row := range rows {
-			if !seen[row.ID] {
-				seen[row.ID] = true
-				results = append(results, row)
-			}
+			seen[row.ID] = true
+			results = append(results, row)
 		}
 		if len(rows) < stageDeletionPageSize {
 			break
 		}
+		afterID = rows[len(rows)-1].ID
 	}
 	return results, seen, nil
 }
@@ -2456,8 +2454,12 @@ func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolRes
 			return toolErrorResult(err.Error()), nil
 		}
 
-		deep := func(limit, offset int) ([]query.MessageSummary, error) {
-			return h.engine.Search(ctx, q, limit, offset)
+		deep := func(limit int, afterID int64) ([]query.MessageSummary, error) {
+			searcher, ok := h.engine.(query.IDPageSearcher)
+			if !ok {
+				return nil, errors.New("query engine does not support message-ID search pages")
+			}
+			return searcher.SearchAfterID(ctx, q, afterID, limit)
 		}
 		var results []query.MessageSummary
 		if q.HasOR() && q.HasTextTerms() {
@@ -2465,8 +2467,9 @@ func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolRes
 			searchNote = "Full-text OR search includes body matches. "
 		} else {
 			filter := query.MessageFilter{SourceID: sourceID}
-			results, err = searchAllForDeletion(func(limit, offset int) ([]query.MessageSummary, error) {
-				return h.engine.SearchFast(ctx, q, filter, limit, offset)
+			results, err = searchAllForDeletion(func(limit int, afterID int64) ([]query.MessageSummary, error) {
+				filter.Pagination.AfterID = &afterID
+				return h.engine.SearchFast(ctx, q, filter, limit, 0)
 			})
 			if err == nil && len(results) == 0 && q.HasTextTerms() {
 				results, err = searchAllForDeletion(deep)

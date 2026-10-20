@@ -3404,6 +3404,9 @@ components:
     DeepSearchResponse:
       additionalProperties: true
       properties:
+        after_id:
+          format: int64
+          type: integer
         body_contexts:
           items:
             $ref: "#/components/schemas/BodySearchContext"
@@ -14392,6 +14395,9 @@ components:
     SearchFastResponse:
       additionalProperties: true
       properties:
+        after_id:
+          format: int64
+          type: integer
         applied_source_ids:
           items:
             format: int64
@@ -31082,6 +31088,12 @@ paths:
           name: page_only
           schema:
             type: boolean
+        - description: Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0 or scope=body
+          in: query
+          name: after_id
+          schema:
+            format: int64
+            type: integer
         - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: q
@@ -31306,6 +31318,12 @@ paths:
           name: page_only
           schema:
             type: boolean
+        - description: Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0 or scope=body
+          in: query
+          name: after_id
+          schema:
+            format: int64
+            type: integer
         - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: q

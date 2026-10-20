@@ -1052,6 +1052,7 @@ func rawRouteParameters(operationID string) []*huma.Param {
 	case "fastSearch":
 		params := append([]*huma.Param{
 			queryBooleanParam("page_only", "Return only the page with total_count=-1 and no stats"),
+			queryIntegerParam("after_id", "Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0 or scope=body"),
 			queryStringParam("q", "Search query; full text accepts standalone pipe-separated OR alternatives", true),
 			queryStringParam("view_type", "Request aggregate stats grouped by this view; omit to skip stats", false),
 		}, messageFilterParams()...)
@@ -1070,6 +1071,7 @@ func rawRouteParameters(operationID string) []*huma.Param {
 		}
 		return append([]*huma.Param{
 			queryBooleanParam("page_only", "Return only the page with total_count=-1 and no stats"),
+			queryIntegerParam("after_id", "Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0 or scope=body"),
 			queryStringParam("q", "Search query; full text accepts standalone pipe-separated OR alternatives", true),
 			queryStringParam("scope", "Exact search scope: body; omit for composite full-text search", false),
 		}, filterParams...)

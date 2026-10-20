@@ -2884,7 +2884,7 @@ func (e *DuckDBEngine) dropSearchCache() {
 
 // searchPageFromCache executes Phase 3 (paginated results) from the cached temp table.
 // Returns a SearchFastResult with cached count and stats.
-func (e *DuckDBEngine) searchPageFromCache(ctx context.Context, limit, offset int, includeStats bool) (*SearchFastResult, error) {
+func (e *DuckDBEngine) searchPageFromCache(ctx context.Context, limit, offset int, includeStats bool, afterID *int64) (*SearchFastResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -2896,11 +2896,21 @@ func (e *DuckDBEngine) searchPageFromCache(ctx context.Context, limit, offset in
 		}
 		return result, nil
 	}
+	whereClause := ""
+	orderBy := "sm.sent_at DESC, sm.id DESC"
+	var args []any
+	if afterID != nil {
+		whereClause = "WHERE sm.id > ?"
+		args = append(args, *afterID)
+		orderBy = "sm.id ASC"
+	}
+	args = append(args, limit, offset)
 	pageQuery := fmt.Sprintf(`
 		WITH %s,
 		page AS (
 			SELECT sm.id FROM %s sm
-			ORDER BY sm.sent_at DESC, sm.id DESC
+			%s
+			ORDER BY %s
 			LIMIT ? OFFSET ?
 		),
 		msg_labels AS (
@@ -2934,10 +2944,10 @@ func (e *DuckDBEngine) searchPageFromCache(ctx context.Context, limit, offset in
 		LEFT JOIN att ON att.message_id = sm.id
 		LEFT JOIN msg_labels mlbl ON mlbl.message_id = sm.id
 		LEFT JOIN conv c ON c.id = sm.conversation_id
-		ORDER BY sm.sent_at DESC, sm.id DESC
-	`, e.parquetCTEs(), e.searchCacheTable, e.searchCacheTable)
+		ORDER BY %s
+	`, e.parquetCTEs(), e.searchCacheTable, whereClause, orderBy, e.searchCacheTable, orderBy)
 
-	rows, err := e.db.QueryContext(ctx, pageQuery, limit, offset)
+	rows, err := e.db.QueryContext(ctx, pageQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search fast page: %w", err)
 	}
@@ -3096,7 +3106,7 @@ func (e *DuckDBEngine) SearchFastWithStats(ctx context.Context, q *search.Query,
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return e.searchPageFromCache(ctx, limit, offset, includeStats)
+		return e.searchPageFromCache(ctx, limit, offset, includeStats, filter.Pagination.AfterID)
 	}
 
 	// Cache miss — drop old cache and materialize fresh.
@@ -3188,7 +3198,7 @@ func (e *DuckDBEngine) SearchFastWithStats(ctx context.Context, q *search.Query,
 	e.searchCacheKey = cacheKey
 
 	// Phase 3: Paginated results from cached temp table.
-	return e.searchPageFromCache(ctx, limit, offset, includeStats)
+	return e.searchPageFromCache(ctx, limit, offset, includeStats, filter.Pagination.AfterID)
 }
 
 // buildSearchConditions builds WHERE conditions for search queries.

@@ -8,6 +8,7 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
+- MCP deletion staging pages by message ID so sync changes behind the cursor cannot hide a matching message.
 - Daemon search and deletion staging skip unused counts and statistics on each page through `page_only=true` on fast and deep search.
 - MCP [`stage_deletion`](usage/chat.md#staged-deletion-via-mcp) stages every match of a query, including through a daemon, instead of 500 metadata or 100 full-text matches. It refuses selections over 100,000 messages without saving a batch.
 - Invalid PDF diagnostics now report `PDF structure could not be validated`.
