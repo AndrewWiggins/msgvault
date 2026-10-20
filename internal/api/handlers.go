@@ -3802,7 +3802,12 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filter.Pagination.PageOnly = r.URL.Query().Get("page_only") == "true"
+	pageOnly, _, err := queryBool(r, "page_only")
+	if err != nil {
+		s.rejectBadParam(w, err)
+		return
+	}
+	filter.Pagination.PageOnly = pageOnly
 
 	// Aggregates are opt-in through an explicit grouping view.
 	statsGroupBy := query.ViewNoStats
@@ -3892,6 +3897,11 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		s.rejectBadParam(w, err)
 		return
 	}
+	pageOnly, _, err := queryBool(r, "page_only")
+	if err != nil {
+		s.rejectBadParam(w, err)
+		return
+	}
 	q := search.ParseWithOR(queryStr, scope != "body")
 	if err := q.Err(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
@@ -3967,7 +3977,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 			// hide_deleted includes retained source-deleted messages.
 			searchScope.DeletionScope = search.DeletionScopeAny
 		}
-		if r.URL.Query().Get("page_only") == "true" {
+		if pageOnly {
 			messages, err = engine.SearchDeep(r.Context(), &searchScope, filter, limit+1, offset)
 			totalCount = -1
 		} else {
@@ -4002,7 +4012,9 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 	if hasMore {
 		messages = messages[:limit]
 	}
-	if scope == "body" {
+	if pageOnly {
+		totalCount = -1
+	} else if scope == "body" {
 		if hasMore || (offset > 0 && len(messages) == 0) {
 			totalCount = -1
 		} else {

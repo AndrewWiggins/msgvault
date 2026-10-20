@@ -91,11 +91,14 @@ func TestHandleFastSearchPageOnlyRejectsView(t *testing.T) {
 func TestHandleDeepSearchPageOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
+		scope   string
 		rows    int
 		hasMore bool
 	}{
-		{"probe row", 3, true},
-		{"last page", 2, false},
+		{"probe row", "", 3, true},
+		{"last page", "", 2, false},
+		{"body probe row", "body", 3, true},
+		{"body last page", "body", 2, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := assert.New(t)
@@ -104,6 +107,7 @@ func TestHandleDeepSearchPageOnly(t *testing.T) {
 			engine := &querytest.MockEngine{
 				SearchDeepFunc: func(_ context.Context, _ *search.Query, _ query.MessageFilter, limit, offset int) ([]query.MessageSummary, error) {
 					called = true
+					assert.Empty(tc.scope)
 					assert.Equal(3, limit)
 					assert.Equal(4, offset)
 					return make([]query.MessageSummary, tc.rows), nil
@@ -113,7 +117,17 @@ func TestHandleDeepSearchPageOnly(t *testing.T) {
 					return &query.SearchFastResult{}, nil
 				},
 			}
-			response := doGet(newTestServerWithEngine(t, engine), "/api/v1/search/deep?q=needle&page_only=true&limit=2&offset=4")
+			bodyEngine := &bodySearchTestEngine{
+				MockEngine: engine,
+				searchMessageBodiesFunc: func(_ context.Context, _ *search.Query, limit, offset int) ([]query.MessageSummary, error) {
+					called = true
+					assert.Equal("body", tc.scope)
+					assert.Equal(3, limit)
+					assert.Equal(4, offset)
+					return make([]query.MessageSummary, tc.rows), nil
+				},
+			}
+			response := doGet(newTestServerWithEngine(t, bodyEngine), "/api/v1/search/deep?q=needle&page_only=true&limit=2&offset=4&scope="+tc.scope)
 			require.Equal(http.StatusOK, response.Code, "body: %s", response.Body.String())
 			assert.True(called)
 			var body map[string]json.RawMessage

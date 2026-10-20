@@ -4,6 +4,10 @@
 
 export type DeepSearchParams = {
   /**
+   * Return only the page with total_count=-1 and no stats
+   */
+  page_only?: boolean;
+  /**
    * Search query; full text accepts standalone pipe-separated OR alternatives
    */
   q: string;
