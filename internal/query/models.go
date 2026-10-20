@@ -281,8 +281,10 @@ type MessageFilter struct {
 
 // Pagination specifies limit and offset for paginated queries.
 type Pagination struct {
-	Limit  int
-	Offset int
+	// PageOnly means the caller ignores TotalCount and Stats, so SearchFastWithStats may skip them.
+	PageOnly bool
+	Limit    int
+	Offset   int
 }
 
 // MessageSorting specifies how to sort message results.

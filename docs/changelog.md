@@ -8,6 +8,7 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
+- Daemon search and deletion staging skip unused counts and statistics on each page through `page_only=true` on fast and deep search.
 - MCP [`stage_deletion`](usage/chat.md#staged-deletion-via-mcp) stages every match of a query, including through a daemon, instead of 500 metadata or 100 full-text matches. It refuses selections over 100,000 messages without saving a batch.
 - Invalid PDF diagnostics now report `PDF structure could not be validated`.
 - Anonymous telemetry omits the SDK's operating system, distribution, and Go version properties. msgvault's own OS and architecture fields remain.

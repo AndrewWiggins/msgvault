@@ -3802,9 +3802,15 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	filter.Pagination.PageOnly = r.URL.Query().Get("page_only") == "true"
+
 	// Aggregates are opt-in through an explicit grouping view.
 	statsGroupBy := query.ViewNoStats
 	if v := r.URL.Query().Get("view_type"); v != "" {
+		if filter.Pagination.PageOnly {
+			writeError(w, http.StatusBadRequest, "invalid_parameter", "page_only cannot be combined with view_type")
+			return
+		}
 		var ok bool
 		statsGroupBy, ok = parseViewType(v)
 		if !ok {
@@ -3838,6 +3844,11 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("fast search failed", "query_shape", queryShapeForRequest(r), "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Search failed")
 		return
+	}
+
+	if filter.Pagination.PageOnly {
+		result.TotalCount = -1
+		result.Stats = nil
 	}
 
 	summaries := make([]MessageSummary, len(result.Messages))
@@ -3956,12 +3967,17 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 			// hide_deleted includes retained source-deleted messages.
 			searchScope.DeletionScope = search.DeletionScopeAny
 		}
-		var result *query.SearchFastResult
-		result, err = engine.SearchDeepWithStats(r.Context(), &searchScope, filter, limit+1, offset)
-		if err == nil {
-			messages = result.Messages
-			totalCount = result.TotalCount
-			stats = result.Stats
+		if r.URL.Query().Get("page_only") == "true" {
+			messages, err = engine.SearchDeep(r.Context(), &searchScope, filter, limit+1, offset)
+			totalCount = -1
+		} else {
+			var result *query.SearchFastResult
+			result, err = engine.SearchDeepWithStats(r.Context(), &searchScope, filter, limit+1, offset)
+			if err == nil {
+				messages = result.Messages
+				totalCount = result.TotalCount
+				stats = result.Stats
+			}
 		}
 	}
 	if err != nil {

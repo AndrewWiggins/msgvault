@@ -2693,6 +2693,10 @@ func (e *SQLiteEngine) SearchFastWithStats(ctx context.Context, q *search.Query,
 		}
 	}
 
+	if filter.Pagination.PageOnly {
+		return &SearchFastResult{Messages: results, TotalCount: -1}, nil
+	}
+
 	// Best-effort count, but cancellation must stop the request's remaining work.
 	count, countErr := e.executeSearchCount(ctx, conditions, args, ftsJoin)
 	if err := ctx.Err(); err != nil {

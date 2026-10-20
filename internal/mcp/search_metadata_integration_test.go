@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -107,7 +108,25 @@ func TestRemoteSearchFastZeroLimitKeepsDefaultPage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(messages, 3, "SearchFast keeps its default page; only the combined API uses zero for count-only")
 	assert.Equal(int32(1), requests.Load())
-	assert.Len(observer.Statements(), 3)
+	assert.Len(observer.Statements(), 2)
+}
+
+func TestRemoteSearchPageOnlySkipsCount(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	db, observer := sqlobserve.Open(t, nil)
+	seedMetadataSearch(t, db)
+	var requests atomic.Int32
+	adapter := metadataDaemon(t, query.NewSQLiteEngine(db), &requests)
+	observer.Reset()
+	messages, err := adapter.Search(t.Context(), search.Parse("after:2023-01-01"), 2, 0)
+	require.NoError(err)
+	require.Len(messages, 2)
+	assert.Equal([]int64{3, 2}, []int64{messages[0].ID, messages[1].ID})
+	assert.Len(observer.Statements(), 2)
+	for _, statement := range observer.Statements() {
+		assert.NotContains(strings.ToUpper(statement), "COUNT(")
+	}
 }
 
 func TestStageDeletionThroughDaemonStagesEveryMatch(t *testing.T) {

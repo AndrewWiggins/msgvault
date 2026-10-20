@@ -33,17 +33,19 @@ func TestMetadataSearchSQLiteOptionalStats(t *testing.T) {
 		name, query                     string
 		limit, offset, rows, statements int
 		total                           int64
+		pageOnly                        bool
 	}{
-		{"page", "after:2024-01-01", 2, 0, 2, 3, 5},
-		{"end", "after:2024-01-01", 2, 9, 0, 2, 5},
-		{"empty", "after:2099-01-01", 2, 0, 0, 2, 0},
-		{"count only", "after:2024-01-01", 0, 0, 0, 1, 5},
+		{"page", "after:2024-01-01", 2, 0, 2, 3, 5, false},
+		{"end", "after:2024-01-01", 2, 9, 0, 2, 5, false},
+		{"empty", "after:2099-01-01", 2, 0, 0, 2, 0, false},
+		{"count only", "after:2024-01-01", 0, 0, 0, 1, 5, false},
+		{"page only", "after:2024-01-01", 2, 0, 2, 2, -1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := assert.New(t)
 			require := require.New(t)
 			engine, observer := observedSearchEngine(t)
-			result, err := engine.SearchFastWithStats(t.Context(), search.Parse(tc.query), tc.query, MessageFilter{}, ViewNoStats, tc.limit, tc.offset)
+			result, err := engine.SearchFastWithStats(t.Context(), search.Parse(tc.query), tc.query, MessageFilter{Pagination: Pagination{PageOnly: tc.pageOnly}}, ViewNoStats, tc.limit, tc.offset)
 			require.NoError(err)
 			assert.Equal(tc.total, result.TotalCount)
 			assert.Len(result.Messages, tc.rows)

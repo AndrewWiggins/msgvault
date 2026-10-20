@@ -30848,6 +30848,11 @@ paths:
     get:
       operationId: deepSearch
       parameters:
+        - description: Return only the page with total_count=-1 and no stats
+          in: query
+          name: page_only
+          schema:
+            type: boolean
         - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: q
@@ -31067,6 +31072,11 @@ paths:
     get:
       operationId: fastSearch
       parameters:
+        - description: Return only the page with total_count=-1 and no stats
+          in: query
+          name: page_only
+          schema:
+            type: boolean
         - description: Search query; full text accepts standalone pipe-separated OR alternatives
           in: query
           name: q

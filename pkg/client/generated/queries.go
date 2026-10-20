@@ -1219,6 +1219,9 @@ func (s SearchMessagesQuery) Validate() error {
 }
 
 type DeepSearchQuery struct {
+	// PageOnly Return only the page with total_count=-1 and no stats
+	PageOnly *bool `json:"page_only,omitempty"`
+
 	// Q Search query; full text accepts standalone pipe-separated OR alternatives
 	Q string `json:"q" validate:"required"`
 
@@ -1327,6 +1330,9 @@ func (s SearchMessagesByDomainsQuery) Validate() error {
 }
 
 type FastSearchQuery struct {
+	// PageOnly Return only the page with total_count=-1 and no stats
+	PageOnly *bool `json:"page_only,omitempty"`
+
 	// Q Search query; full text accepts standalone pipe-separated OR alternatives
 	Q string `json:"q" validate:"required"`
 

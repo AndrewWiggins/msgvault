@@ -445,6 +445,7 @@ func fastSearchQuery(queryStr string, filter query.MessageFilter, statsGroupBy q
 	}
 	return &generated.FastSearchQuery{
 		Q:               queryStr,
+		PageOnly:        optionalBool(filter.Pagination.PageOnly),
 		ViewType:        viewType,
 		Sender:          fields.Sender,
 		SenderName:      fields.SenderName,
@@ -996,6 +997,7 @@ func (e *Engine) Search(ctx context.Context, q *search.Query, limit, offset int)
 	if err != nil {
 		return nil, err
 	}
+	queryParams.PageOnly = optionalBool(true)
 	queryParams.AccountScopes = encodedAccountScopes(scoped.AccountScopes)
 
 	resp, err := APIResponse(e.store, func(client *apiclient.Client) (*generated.DeepSearchResp, error) {
@@ -1144,6 +1146,7 @@ func (e *Engine) SearchFast(ctx context.Context, q *search.Query, filter query.M
 	if limit == 0 {
 		limit = 100 // SearchFast retains the native engines' default page size.
 	}
+	filter.Pagination.PageOnly = true
 	result, err := e.SearchFastWithStats(ctx, q, "", filter, query.ViewNoStats, limit, offset)
 	if err != nil {
 		return nil, err
