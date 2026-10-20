@@ -439,6 +439,12 @@ func runEmbeddingsActivate(cmd *cobra.Command, args []string) error {
 	}
 	defer closeDB()
 
+	backend, closeBackend, err := openEmbeddingsBackend(cmd.Context())
+	if err != nil {
+		return err
+	}
+	defer closeBackend()
+
 	row, err := getEmbeddingGeneration(cmd.Context(), db, rebind, gen)
 	if err != nil {
 		return err
@@ -493,11 +499,6 @@ func runEmbeddingsActivate(cmd *cobra.Command, args []string) error {
 	// prior active generation in one transaction. The fingerprint check above
 	// is the only gate the backend cannot make (it does not know the config
 	// fingerprint); the coverage gate is owned by the backend.
-	backend, closeBackend, err := openEmbeddingsBackend(cmd.Context())
-	if err != nil {
-		return err
-	}
-	defer closeBackend()
 	if contextualSequence != nil {
 		activator, ok := backend.(vector.ConvergedGenerationActivator)
 		if !ok {
@@ -618,6 +619,12 @@ func planCLIEmbeddingsActivate(
 		return api.CLIEmbeddingsPlanResponse{}, err
 	}
 	defer closeDB()
+
+	_, closeBackend, err := openEmbeddingsBackend(ctx)
+	if err != nil {
+		return api.CLIEmbeddingsPlanResponse{}, err
+	}
+	defer closeBackend()
 
 	row, err := getEmbeddingGeneration(ctx, db, rebind, gen)
 	if err != nil {
@@ -837,7 +844,7 @@ func openEmbeddingsBackendWithMode(ctx context.Context, readOnly bool) (vector.B
 	}
 	cfg := state.cfg
 	endpointFP := ""
-	if cfg.Vector.Enabled && !readOnly {
+	if cfg.Vector.Enabled {
 		endpointFP = cfg.Vector.Embeddings.EndpointFingerprint()
 	}
 	dsn := cfg.DatabaseDSN()

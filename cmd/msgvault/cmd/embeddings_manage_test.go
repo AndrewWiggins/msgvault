@@ -401,6 +401,57 @@ func assertManualGenerationState(t *testing.T, gen vector.GenerationID, want vec
 	assert.Equal(t, want, row.State)
 }
 
+func TestEmbeddingsActivate_AdoptsLegacyEndpoint(t *testing.T) {
+	for _, plan := range []bool{false, true} {
+		t.Run(strconv.FormatBool(plan), func(t *testing.T) {
+			dir := t.TempDir()
+			c := config.NewDefaultConfig()
+			c.HomeDir = dir
+			c.Data.DataDir = dir
+			c.Vector.Enabled = true
+			c.Vector.DBPath = filepath.Join(dir, "vectors.db")
+			c.Vector.Embeddings.Endpoint = "https://example.invalid/v1"
+			c.Vector.Embeddings.Model = "test-model"
+			c.Vector.Embeddings.Dimension = 4
+			ctx := withTestConfig(t, c)
+			mainStore, err := store.Open(c.DatabaseDSN())
+			require.NoError(t, err)
+			defer func() { require.NoError(t, mainStore.Close()) }()
+			require.NoError(t, mainStore.InitSchema())
+			_, err = mainStore.DB().Exec(`
+INSERT INTO sources (id, source_type, identifier) VALUES (1, 'gmail', 'test@example.com');
+INSERT INTO conversations (id, source_id, source_conversation_id, conversation_type) VALUES (1, 1, 'thread-1', 'email_thread');
+INSERT INTO messages (id, conversation_id, source_id, source_message_id, message_type) VALUES (1, 1, 1, 'message-1', 'email');`)
+			require.NoError(t, err)
+			require.NoError(t, sqlitevec.RegisterExtension())
+			b, err := sqlitevec.Open(ctx, sqlitevec.Options{
+				Path: c.Vector.DBPath, MainPath: c.DatabaseDSN(), Dimension: 4, MainDB: mainStore.DB(),
+			})
+			require.NoError(t, err)
+			gen, err := b.CreateGeneration(ctx, "test-model", 4, "test-model:4:p1-111111:c32768:e1")
+			require.NoError(t, err)
+			require.NoError(t, b.Upsert(ctx, gen, []vector.Chunk{{MessageID: 1, Vector: []float32{1, 0, 0, 0}}}))
+			_, err = mainStore.DB().Exec(`UPDATE messages SET embed_gen = ? WHERE id = 1`, gen)
+			require.NoError(t, err)
+			require.NoError(t, b.Close())
+			oldYes, oldForce := embeddingsActivateYes, embeddingsActivateForce
+			embeddingsActivateYes, embeddingsActivateForce = true, false
+			t.Cleanup(func() { embeddingsActivateYes, embeddingsActivateForce = oldYes, oldForce })
+			previousContext := embeddingsActivateCmd.Context()
+			embeddingsActivateCmd.SetContext(ctx)
+			t.Cleanup(func() { embeddingsActivateCmd.SetContext(previousContext) })
+			if plan {
+				response, err := planCLIEmbeddingsActivate(ctx, gen, false)
+				require.NoError(t, err)
+				assert.Contains(t, response.Prompt, c.Vector.GenerationFingerprint())
+			} else {
+				require.NoError(t, runEmbeddingsActivate(embeddingsActivateCmd, []string{strconv.FormatInt(int64(gen), 10)}))
+				assertManualGenerationState(t, gen, vector.GenerationActive)
+			}
+		})
+	}
+}
+
 func TestRunEmbeddingsActivate_ContextualLifecycleRefusalsStayNonActivating(t *testing.T) {
 	t.Run("wrong generation fingerprint", func(t *testing.T) {
 		gen := setupManualContextualGeneration(t,

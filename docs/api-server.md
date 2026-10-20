@@ -976,7 +976,7 @@ anyway: the response sets `"counts_pending": true`, and every account's
       "id": 3,
       "model": "nomic-embed-text-v1.5",
       "dimension": 768,
-      "fingerprint": "nomic-embed-text-v1.5:768:p1-111111:c32768:e1",
+      "fingerprint": "nomic-embed-text-v1.5:768:p1-111111:c32768:e1:u89caf70a6a58a082c8bd16cc0a4ad72d0a2ab0a8d0f495421057ebb5ce6460ee",
       "state": "active",
       "activated_at": "2026-04-18T15:12:33Z",
       "message_count": 142820
@@ -1972,7 +1972,7 @@ query string can also carry `message_type:` / `message_type=` operators inside
       "id": 3,
       "model": "nomic-embed-text-v1.5",
       "dimension": 768,
-      "fingerprint": "nomic-embed-text-v1.5:768:p1-111111:c32768:e1",
+      "fingerprint": "nomic-embed-text-v1.5:768:p1-111111:c32768:e1:u89caf70a6a58a082c8bd16cc0a4ad72d0a2ab0a8d0f495421057ebb5ce6460ee",
       "state": "active"
     },
   "took_ms": 84,

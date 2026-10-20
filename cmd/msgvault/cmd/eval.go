@@ -1093,14 +1093,15 @@ func (e *evaluator) attachVector(ctx context.Context, mainStore *store.Store) (f
 		return nil, fmt.Errorf("register sqlite-vec: %w", err)
 	}
 	backend, err := sqlitevec.Open(ctx, sqlitevec.Options{
-		Path:            vecDBPath,
-		MainPath:        mainPath,
-		Dimension:       vecCfg.Embeddings.Dimension,
-		MainDB:          mainDB,
-		BuildScope:      vecCfg.Embed.Scope.BuildScope(),
-		ANNOversample:   vecCfg.Search.ANNOversample,
-		ANNNProbe:       vecCfg.Search.ANNNProbe,
-		AcceleratorMode: vecCfg.Search.SQLiteAccelerator,
+		EndpointFingerprint: vecCfg.Embeddings.EndpointFingerprint(),
+		Path:                vecDBPath,
+		MainPath:            mainPath,
+		Dimension:           vecCfg.Embeddings.Dimension,
+		MainDB:              mainDB,
+		BuildScope:          vecCfg.Embed.Scope.BuildScope(),
+		ANNOversample:       vecCfg.Search.ANNOversample,
+		ANNNProbe:           vecCfg.Search.ANNNProbe,
+		AcceleratorMode:     vecCfg.Search.SQLiteAccelerator,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open vectors.db: %w", err)

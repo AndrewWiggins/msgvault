@@ -3,7 +3,6 @@ package vectortest
 
 import (
 	"database/sql"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,15 +55,4 @@ func EndpointAdoption(t *testing.T, b vector.Backend, db *sql.DB, rebind func(st
 	got, err = vector.ResolveActiveForFingerprint(ctx, b, cfg.GenerationFingerprint())
 	require.NoError(t, err)
 	assert.Equal(t, active, got.ID)
-	// A future release may append another segment after the endpoint.
-	require.NoError(t, b.RetireGeneration(ctx, building, true))
-	future := differentPolicy + ":u" + strings.Repeat("a", 64) + ":future1"
-	building, err = b.CreateGeneration(ctx, "m", 768, future)
-	require.NoError(t, err)
-	b = reopen(hash)
-	pending, err = b.BuildingGeneration(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, pending)
-	assert.Equal(t, building, pending.ID)
-	assert.Equal(t, future, pending.Fingerprint)
 }

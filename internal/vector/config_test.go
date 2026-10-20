@@ -493,7 +493,8 @@ func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
 	cfg := Config{Embeddings: EmbeddingsConfig{
 		Model: "nomic-embed-text", Dimension: 768, Endpoint: "https://host/v1",
 	}}
-	baseline := cfg.GenerationFingerprint()
+	baseline := "nomic-embed-text:768:p1-111111:c0:e1:uac9155fdf06567ceee29a98db867db2edc2fa762db23011b047faf504e08c1f5"
+	assert.Equal(t, baseline, cfg.GenerationFingerprint())
 	for _, tc := range []struct {
 		name     string
 		endpoint string
@@ -519,15 +520,19 @@ func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
 }
 
 func TestConfig_GenerationFingerprint_VoyageEndpointPath(t *testing.T) {
+	assert := assert.New(t)
 	cfg := Config{Embeddings: EmbeddingsConfig{
 		APIFormat: APIFormatVoyageContextual, Model: "voyage-context-4", Dimension: 1024, Endpoint: "https://host/v1",
 	}}
 	cfg.ApplyDefaults()
+	assert.Equal("ac9155fdf06567ceee29a98db867db2edc2fa762db23011b047faf504e08c1f5", cfg.Embeddings.EndpointFingerprint())
+	cfg.Embeddings.Endpoint = "https://host/v1/"
+	assert.Equal("ac9155fdf06567ceee29a98db867db2edc2fa762db23011b047faf504e08c1f5", cfg.Embeddings.EndpointFingerprint())
 	baseline := cfg.GenerationFingerprint()
 	for _, endpoint := range []string{"https://host/v1/embeddings", "https://host/v1?", "https://host/v1#"} {
 		cfg.Embeddings.Endpoint = endpoint
-		assert.NotEqual(t, baseline, cfg.GenerationFingerprint())
-		assert.NoError(t, cfg.Embeddings.Validate())
+		assert.NotEqual(baseline, cfg.GenerationFingerprint())
+		assert.NoError(cfg.Embeddings.Validate())
 	}
 }
 

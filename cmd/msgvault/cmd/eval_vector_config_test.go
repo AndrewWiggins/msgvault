@@ -81,6 +81,38 @@ func seedActiveGeneration(t *testing.T, dataDir, mainPath string, mainDB *sql.DB
 	require.NoError(t, b.ActivateGeneration(ctx, gen, true), "ActivateGeneration")
 }
 
+func TestAttachVector_AdoptsLegacyEndpoint(t *testing.T) {
+	dataDir := t.TempDir()
+	s := seedRankingDivergenceArchiveIn(t, dataDir)
+	c := evalVectorConfig(t, vector.APIFormatOpenAI, "test-model")
+	c.Data.DataDir = dataDir
+	c.Vector.Embeddings.Dimension = 4
+	ctx := withTestConfig(t, c)
+	require.NoError(t, sqlitevec.RegisterExtension())
+	b, err := sqlitevec.Open(ctx, sqlitevec.Options{
+		Path: filepath.Join(dataDir, "vectors.db"), MainPath: c.DatabaseDSN(),
+		Dimension: 4, MainDB: s.DB(),
+	})
+	require.NoError(t, err)
+	gen, err := b.CreateGeneration(ctx, "test-model", 4, "test-model:4:p1-111111:c32768:e1")
+	require.NoError(t, err)
+	require.NoError(t, b.ActivateGeneration(ctx, gen, true))
+	require.NoError(t, b.Close())
+
+	ev := &evaluator{ctx: ctx, diag: &runDiagnostics{}}
+	cleanup, err := ev.attachVector(ctx, s)
+	require.NoError(t, err)
+	defer cleanup()
+	adopted, err := sqlitevec.Open(ctx, sqlitevec.Options{
+		Path: filepath.Join(dataDir, "vectors.db"), Dimension: 4, ReadOnly: true,
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, adopted.Close()) }()
+	active, err := vector.ResolveActiveForFingerprint(ctx, adopted, c.Vector.GenerationFingerprint())
+	require.NoError(t, err)
+	assert.Equal(t, gen, active.ID)
+}
+
 // TestAttachVector_EmbedsQueriesThroughConfiguredAPIFormat is the end-to-end
 // binding: run the eval command's own vector setup against a config that says
 // api_format = "voyage-contextual", then embed a query through the engine it

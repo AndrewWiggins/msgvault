@@ -16,7 +16,6 @@ func TestHasEndpointSegment(t *testing.T) {
 		want        bool
 	}{
 		{"m:768:u" + strings.Repeat("a", 64), true},
-		{"m:768:u" + strings.Repeat("a", 64) + ":future1", true},
 		{"u" + strings.Repeat("a", 64) + ":768", false},
 		{"m:768:u" + strings.Repeat("a", 63), false},
 		{"m:768:u" + strings.Repeat("a", 65), false},

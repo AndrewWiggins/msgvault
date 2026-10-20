@@ -556,7 +556,7 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 	}
 
 	endpointFP := ""
-	if vecCfg.Enabled && !readOnly {
+	if vecCfg.Enabled {
 		endpointFP = vecCfg.Embeddings.EndpointFingerprint()
 	}
 	var (

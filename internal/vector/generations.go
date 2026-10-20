@@ -13,9 +13,9 @@ import (
 // would re-run on every Open.
 const EmbedGenBackfillMigration = "embed_gen_backfill_active_v1"
 
-var endpointSegment = regexp.MustCompile(`:u[0-9a-f]{64}(?::|$)`)
+var endpointSegment = regexp.MustCompile(`:u[0-9a-f]{64}$`)
 
-// HasEndpointSegment recognizes an endpoint identity even before newer segments.
+// HasEndpointSegment recognizes a trailing endpoint identity.
 func HasEndpointSegment(fp string) bool {
 	return endpointSegment.MatchString(fp)
 }
