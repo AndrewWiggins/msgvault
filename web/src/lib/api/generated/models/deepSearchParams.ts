@@ -8,6 +8,10 @@ export type DeepSearchParams = {
    */
   page_only?: boolean;
   /**
+   * Return IDs above this cursor in ascending ID order; minimum 0; incompatible with offset > 0 or scope=body
+   */
+  after_id?: number;
+  /**
    * Search query; full text accepts standalone pipe-separated OR alternatives
    */
   q: string;

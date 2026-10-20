@@ -5,6 +5,7 @@ import type { MessageSummary } from "./messageSummary";
 import type { TotalStatsResponse } from "./totalStatsResponse";
 
 export interface SearchFastResponse {
+  after_id?: number;
   applied_source_ids?: number[];
   index_state?: string;
   messages: MessageSummary[];

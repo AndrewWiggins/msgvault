@@ -172,10 +172,23 @@ func TestSearchAfterID(t *testing.T) {
 				}
 			})
 		}
-		for _, params := range []string{"after_id=-1", "after_id=bad", "after_id=0&offset=1", "after_id=0&scope=body"} {
-			t.Run(route+"/"+params, func(t *testing.T) {
-				response := doGet(newTestServerWithEngine(t, &querytest.MockEngine{}), "/api/v1/search/"+route+"?q=needle&"+params)
+		for _, tc := range []struct {
+			params string
+			code   string
+		}{
+			{"after_id=-1", "invalid_parameter"},
+			{"after_id=bad", "invalid_after_id"},
+			{"after_id=1.5", "invalid_after_id"},
+			{"after_id=9223372036854775808", "invalid_after_id"},
+			{"after_id=0&offset=1", "invalid_parameter"},
+			{"after_id=0&scope=body", "invalid_parameter"},
+		} {
+			t.Run(route+"/"+tc.params, func(t *testing.T) {
+				response := doGet(newTestServerWithEngine(t, &querytest.MockEngine{}), "/api/v1/search/"+route+"?q=needle&"+tc.params)
 				assert.Equal(t, http.StatusBadRequest, response.Code)
+				var body ErrorResponse
+				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+				assert.Equal(t, tc.code, body.Error)
 			})
 		}
 	}

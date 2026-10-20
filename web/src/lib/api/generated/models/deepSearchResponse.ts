@@ -6,6 +6,7 @@ import type { MessageSummary } from "./messageSummary";
 import type { TotalStatsResponse } from "./totalStatsResponse";
 
 export interface DeepSearchResponse {
+  after_id?: number;
   body_contexts?: BodySearchContext[];
   count: number;
   has_more: boolean;
