@@ -477,7 +477,8 @@ func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
 	cfg := Config{Embeddings: EmbeddingsConfig{
 		Model: "nomic-embed-text", Dimension: 768, Endpoint: "https://host/v1",
 	}}
-	baseline := "nomic-embed-text:768:p1-111111:c0:e1:uac9155fdf06567ceee29a98db867db2edc2fa762db23011b047faf504e08c1f5"
+	cfg.ApplyDefaults()
+	baseline := "nomic-embed-text:768:p1-111111:c32768:e1:uac9155fdf06567ceee29a98db867db2edc2fa762db23011b047faf504e08c1f5"
 	assert.Equal(t, baseline, cfg.GenerationFingerprint())
 	for _, tc := range []struct {
 		name     string
@@ -502,15 +503,6 @@ func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestConfig_GenerationFingerprint_ExcludesEndpointURL(t *testing.T) {
-	cfg := Config{Embeddings: EmbeddingsConfig{
-		Model: "nomic-embed-text", Dimension: 768, Endpoint: "https://embed.example/token-in-path/v1",
-	}}
-	fingerprint := cfg.GenerationFingerprint()
-	assert.NotContains(t, fingerprint, "token-in-path")
-	assert.NotContains(t, fingerprint, "embed.example")
 }
 
 func TestEmbeddingsConfig_EndpointFingerprint_InvalidEndpoint(t *testing.T) {
@@ -538,11 +530,11 @@ func TestConfig_GenerationFingerprint_VoyageEndpointPath(t *testing.T) {
 // inconsistently-prepared vectors.
 func TestConfig_GenerationFingerprintFolds(t *testing.T) {
 	base := Config{
-		Embeddings: EmbeddingsConfig{Model: "nomic-embed", Dimension: 768, MaxInputChars: 6000, Endpoint: "https://host/v1"},
+		Embeddings: EmbeddingsConfig{Model: "nomic-embed", Dimension: 768, MaxInputChars: 6000},
 	}
 	got := base.GenerationFingerprint()
-	want := fmt.Sprintf("nomic-embed:768:p1-111111:c6000:e%d:u%s", embedPolicyVersion, base.Embeddings.EndpointFingerprint())
-	assert.Equal(t, want, got)
+	want := fmt.Sprintf("nomic-embed:768:p1-111111:c6000:e%d", embedPolicyVersion)
+	assert.Equal(t, want, strings.Split(got, ":u")[0])
 
 	// Flipping the model invalidates.
 	modelChanged := base

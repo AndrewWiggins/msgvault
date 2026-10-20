@@ -15,9 +15,10 @@ import (
 func EndpointAdoption(t *testing.T, b vector.Backend, db *sql.DB, rebind func(string) string, reopen func(string) vector.Backend, writable bool) {
 	t.Helper()
 	ctx := t.Context()
-	const legacy = "m:768:p1-111111:c0:e1"
+	const legacy = "m:768:p1-111111:c32768:e1"
 	const differentPolicy = "m:768:p1-111111:c6000:e1:smt-email"
 	cfg := vector.Config{Embeddings: vector.EmbeddingsConfig{Model: "m", Dimension: 768, Endpoint: "https://first.example/v1"}}
+	cfg.ApplyDefaults()
 	hash := cfg.Embeddings.EndpointFingerprint()
 	retired, err := b.CreateGeneration(ctx, "m", 768, legacy)
 	require.NoError(t, err)

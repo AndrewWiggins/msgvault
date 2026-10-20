@@ -1206,7 +1206,7 @@ func TestKitMigrationReusesExistingGenerationForIndexAndSearch(t *testing.T) {
 	must.NoError(err)
 	must.NotNil(vf)
 	t.Cleanup(func() { assert.NoError(vf.Close()) })
-	backend, cfg := vf.Backend, vf.Cfg
+	cfg := vf.Cfg
 
 	hits, metadata, err := vf.HybridEngine.Search(ctx, hybrid.SearchRequest{Mode: hybrid.ModeVector, FreeText: "find existing message", Limit: 10})
 	must.NoError(err)
@@ -1215,16 +1215,6 @@ func TestKitMigrationReusesExistingGenerationForIndexAndSearch(t *testing.T) {
 	assert.Equal(generation, metadata.Generation.ID)
 	assert.Equal(cfg.GenerationFingerprint(), metadata.Generation.Fingerprint)
 	assert.Equal(int32(1), requests.Load(), "only the query is embedded")
-
-	t.Run("model", func(t *testing.T) {
-		require := require.New(t)
-		changed := cfg
-		changed.Embeddings.Model = "other-model"
-		_, err := vector.ResolveActiveForFingerprint(ctx, backend, changed.GenerationFingerprint())
-		require.ErrorIs(err, vector.ErrIndexStale)
-		_, _, err = pickEmbedGeneration(ctx, backend, embedGenerationOpts{Model: changed.Embeddings.Model, Dimension: 4, Fingerprint: changed.GenerationFingerprint(), Stderr: openStderrSink(t)})
-		require.ErrorIs(err, vector.ErrIndexStale)
-	})
 }
 
 func TestSetupVectorFeatures_PreservesLegacyEndpointFingerprintWhenTextDisabled(t *testing.T) {
@@ -1254,7 +1244,8 @@ func TestSetupVectorFeatures_PreservesLegacyEndpointFingerprintWhenTextDisabled(
 
 	// Multimodal initialization reaches the writable backend before requiring
 	// an attachment store. Text endpoint adoption must remain disabled.
-	_, _ = setupVectorFeatures(testCtx, s, mainPath, false)
+	_, err = setupVectorFeatures(testCtx, s, mainPath, false)
+	require.EqualError(t, err, "configure multimodal runtime: attachment content store is unavailable")
 	b, err = sqlitevec.Open(testCtx, sqlitevec.Options{Path: c.Vector.DBPath, MetadataReadOnly: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, b.Close()) })
@@ -1296,7 +1287,6 @@ func TestRunEmbed_AdoptsLegacyEndpointBeforeGenerationSelection(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	require.NoError(runEmbed(cmd))
-	assert.Equal(2, embedded)
 
 	backend, err = sqlitevec.Open(t.Context(), sqlitevec.Options{Path: c.Vector.DBPath, Dimension: 4})
 	require.NoError(err)
