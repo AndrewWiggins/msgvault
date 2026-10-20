@@ -496,6 +496,7 @@ func (c *Config) GenerationFingerprint() string {
 }
 
 // EndpointFingerprint identifies the embedding destination without exposing its URL.
+// The document lane canonicalizes its endpoint separately in internal/vector/document/model.go vectorSpaceIdentity.
 func (e EmbeddingsConfig) EndpointFingerprint() string {
 	endpoint := strings.TrimRight(e.Endpoint, "/")
 	if e.EffectiveAPIFormat() == APIFormatOpenAI {

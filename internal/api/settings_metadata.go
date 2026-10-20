@@ -132,7 +132,7 @@ var settingsMetadata = map[string]settingMetadata{
 	"vector.skip_extension_create": {"Skip extension creation", "Use a vector extension an administrator already installed.", "semantic"},
 
 	"vector.embeddings.api_format":      {"Text embedding API format", "Request format the provider expects.", sectionProvider},
-	"vector.embeddings.endpoint":        {"Text embedding endpoint", "Base URL of the embedding API.", sectionProvider},
+	"vector.embeddings.endpoint":        {"Text embedding endpoint", "Base URL of the embedding API. Changing it starts a new index generation.", sectionProvider},
 	"vector.embeddings.api_key_env":     {"Text embedding key variable", "Environment variable the daemon reads when no stored credential exists.", sectionProvider},
 	"vector.embeddings.api_key":         {"Text embedding API key", "Stored key for the endpoint. It overrides the environment variable.", sectionProvider},
 	"vector.embeddings.model":           {"Text embedding model", "Model identifier. Changing it starts a new index generation.", sectionProvider},

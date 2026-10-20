@@ -752,7 +752,7 @@ activates; it does not depend on the vector index. In MCP, omit `mode` for
 metadata search or use `search_message_bodies`. Once `msgvault embeddings
 build` reports the new generation activated, vector and hybrid modes resume.
 
-An older index records the configured endpoint at the first writable vector start with vectors enabled; an endpoint change made before that start goes undetected.
+An older index records the configured endpoint at the first writable vector start with vectors enabled, including `msgvault embeddings activate` and `msgvault eval`; an endpoint change made before that start goes undetected.
 Downgrading afterward reports `index_stale`.
 
 ## Troubleshooting

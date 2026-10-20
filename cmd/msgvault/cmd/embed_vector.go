@@ -384,7 +384,7 @@ func pickEmbedGeneration(ctx context.Context, backend vector.Backend, opts embed
 				building.ID, building.Fingerprint)
 			return building.ID, true, nil
 		}
-		return 0, false, fmt.Errorf("in-progress rebuild has fingerprint=%q, config has %q — activate or retire it before running with a different model or embed scope (the fingerprint folds in [vector.embed.scope] message_types/accounts and any --account/--collection flags)",
+		return 0, false, fmt.Errorf("in-progress rebuild has fingerprint=%q, config has %q — activate or retire it before running with a different endpoint, model, or embed scope (the fingerprint folds in [vector.embed.scope] message_types/accounts and any --account/--collection flags)",
 			building.Fingerprint, opts.Fingerprint)
 	}
 

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -103,6 +104,15 @@ func TestAttachVector_AdoptsLegacyEndpoint(t *testing.T) {
 	cleanup, err := ev.attachVector(ctx, s)
 	require.NoError(t, err)
 	defer cleanup()
+
+	b, err = sqlitevec.Open(ctx, sqlitevec.Options{
+		Path: filepath.Join(dataDir, "vectors.db"), Dimension: 4,
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, b.Close()) }()
+	active, err := b.ActiveGeneration(ctx)
+	require.NoError(t, err)
+	assert.True(t, strings.HasSuffix(active.Fingerprint, ":u"+c.Vector.Embeddings.EndpointFingerprint()), "stored fingerprint must include the configured endpoint")
 }
 
 // TestAttachVector_EmbedsQueriesThroughConfiguredAPIFormat is the end-to-end

@@ -489,17 +489,13 @@ func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
 		{"embeddings suffix", "https://host/v1/embeddings", true},
 		{"different path", "https://host/v2", false},
 		{"changed host", "https://other.example/v1", false},
-		{"URL not in fingerprint", "https://embed.example/token-in-path/v1", false},
 		{"non-default port", "https://host:8443/v1", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := assert.New(t)
 			cfg := cfg
 			cfg.Embeddings.Endpoint = tc.endpoint
-			if tc.name == "URL not in fingerprint" {
-				assert.NotContains(cfg.GenerationFingerprint(), "token-in-path")
-				assert.NotContains(cfg.GenerationFingerprint(), "embed.example")
-			} else if tc.equal {
+			if tc.equal {
 				assert.Equal(baseline, cfg.GenerationFingerprint())
 			} else {
 				assert.NotEqual(baseline, cfg.GenerationFingerprint())
@@ -508,16 +504,18 @@ func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
 	}
 }
 
+func TestConfig_GenerationFingerprint_ExcludesEndpointURL(t *testing.T) {
+	cfg := Config{Embeddings: EmbeddingsConfig{
+		Model: "nomic-embed-text", Dimension: 768, Endpoint: "https://embed.example/token-in-path/v1",
+	}}
+	fingerprint := cfg.GenerationFingerprint()
+	assert.NotContains(t, fingerprint, "token-in-path")
+	assert.NotContains(t, fingerprint, "embed.example")
+}
+
 func TestEmbeddingsConfig_EndpointFingerprint_InvalidEndpoint(t *testing.T) {
-	for _, tc := range []struct {
-		endpoint string
-		want     string
-	}{
-		{"https://example.com/v1/../embeddings", "c4c05946a2cb21b03d4828cec7b442db86dfb56f6fd583e22bf9c5d64ad2eefa"},
-	} {
-		cfg := EmbeddingsConfig{Endpoint: tc.endpoint}
-		assert.Equal(t, tc.want, cfg.EndpointFingerprint())
-	}
+	cfg := EmbeddingsConfig{Endpoint: "https://example.com/v1/../embeddings"}
+	assert.Equal(t, "c4c05946a2cb21b03d4828cec7b442db86dfb56f6fd583e22bf9c5d64ad2eefa", cfg.EndpointFingerprint())
 }
 
 func TestConfig_GenerationFingerprint_VoyageEndpointPath(t *testing.T) {
