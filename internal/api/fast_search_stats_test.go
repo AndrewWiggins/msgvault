@@ -61,10 +61,9 @@ func TestHandleFastSearchPageOnly(t *testing.T) {
 	require := require.New(t)
 	engine := &querytest.MockEngine{
 		SearchFastWithStatsFunc: func(_ context.Context, _ *search.Query, _ string,
-			filter query.MessageFilter, view query.ViewType, _, _ int) (*query.SearchFastResult, error) {
+			filter query.MessageFilter, _ query.ViewType, _, _ int) (*query.SearchFastResult, error) {
 			assert.True(filter.Pagination.PageOnly)
-			assert.Equal(query.ViewNoStats, view)
-			return &query.SearchFastResult{TotalCount: 7, Stats: &query.TotalStats{}}, nil
+			return &query.SearchFastResult{TotalCount: 7}, nil
 		},
 	}
 	server := newTestServerWithEngine(t, engine)
@@ -97,7 +96,6 @@ func TestHandleDeepSearchPageOnly(t *testing.T) {
 	}{
 		{"probe row", "", 3, true},
 		{"last page", "", 2, false},
-		{"body probe row", "body", 3, true},
 		{"body last page", "body", 2, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

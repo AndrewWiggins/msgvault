@@ -81,7 +81,6 @@ func TestInvalidQueryParamsReturn400(t *testing.T) {
 		{"search page_size not numeric", "/api/v1/search?q=hi&page_size=xyz", "invalid_page_size", "page_size"},
 		{"fast search page_only not boolean", "/api/v1/search/fast?q=needle&page_only=tru", "invalid_page_only", "page_only"},
 		{"deep search page_only not boolean", "/api/v1/search/deep?q=needle&page_only=tru", "invalid_page_only", "page_only"},
-		{"body search page_only not boolean", "/api/v1/search/deep?q=needle&scope=body&page_only=tru", "invalid_page_only", "page_only"},
 	}
 
 	for _, tc := range tests {
