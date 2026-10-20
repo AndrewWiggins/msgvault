@@ -1828,7 +1828,7 @@ External OpenAI-compatible embedding endpoint used to convert message text into 
 | Key | Default | Description |
 |---|---|---|
 | `api_format` | `openai` | Request contract: `openai` (OpenAI-compatible `/embeddings`, one vector per message chunk) or `voyage-contextual` (Voyage `/contextualizedembeddings`; pins `model = "voyage-context-4"` and embeds chat conversation windows and turn-aware meeting chunks as contextual documents). |
-| `endpoint` | (required) | HTTP(S) base URL for an OpenAI-compatible embeddings API. msgvault appends `/embeddings` (for example, set `http://localhost:11434/v1`, not `.../embeddings`). |
+| `endpoint` | (required) | HTTP(S) base URL for an OpenAI-compatible embeddings API. msgvault appends `/embeddings` (for example, set `http://localhost:11434/v1`, not `.../embeddings`). Changing the endpoint requires `msgvault embeddings build --full-rebuild`, including moving the same server to a new host or port. |
 | `model` | (required) | Model name or serving alias to pass in each request (e.g., `nomic-embed-text`). Use a new alias when the served weights or vector recipe change; msgvault does not verify the checkpoint behind an alias. |
 | `dimension` | (required) | Expected vector width. Responses with a different width are rejected. The OpenAI-compatible client does not send a `dimensions` field or slice returned vectors; configure the server to return the desired width. |
 | `document_prefix` | `""` | Model-specific instruction prepended to every document chunk after chunking (for example, `"search_document: "` for `nomic-embed-text`). The prefix does not reduce `max_input_chars`; maximum 4096 UTF-8 bytes. |
@@ -1895,7 +1895,7 @@ Sweep providers use their own named profile credentials. Use
 `msgvault person provider add --api-key-stdin` or `--credential-env` for them;
 the legacy `people.sweep` store ID is not consumed by current sweep runs.
 
-The index generation fingerprint includes the model, dimension, document and query prefixes, preprocessing settings, `max_input_chars`, embedding policy, and scope. Changing those settings triggers a stale-index error on the next vector/hybrid query. For an existing account-scoped generation built with CLI flags, set matching `[vector.embed.scope].accounts` and restart the daemon; otherwise run `msgvault embeddings build --full-rebuild`.
+The index generation fingerprint includes the endpoint, model, dimension, document and query prefixes, preprocessing settings, `max_input_chars`, embedding policy, and scope. Changing those settings triggers a stale-index error on the next vector/hybrid query. For an existing account-scoped generation built with CLI flags, set matching `[vector.embed.scope].accounts` and restart the daemon; otherwise run `msgvault embeddings build --full-rebuild`.
 
 #### `[vector.preprocess]`
 

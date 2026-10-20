@@ -8,6 +8,7 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
+- Changing the embedding endpoint now reports `index_stale` until a full rebuild. Existing indexes keep serving and record the configured endpoint on the first writable start with vectors enabled after the upgrade.
 - Invalid PDF diagnostics now report `PDF structure could not be validated`.
 - Anonymous telemetry omits the SDK's operating system, distribution, and Go version properties. msgvault's own OS and architecture fields remain.
 - msgvault's [anonymous telemetry](configuration.md#telemetry) now counts searches, message opens and manual syncs from the web, TUI and CLI, with no query text, IDs or archive content. The CLI and TUI wait at most 50 ms for pending reports at exit.

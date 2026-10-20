@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"go.kenn.io/kit/embedconfig"
+
 	"go.kenn.io/msgvault/internal/envutil"
 )
 
@@ -452,6 +454,7 @@ func (e EmbeddingsConfig) Fingerprint() string {
 // Non-empty document or query prefixes add a hashed ":t<digest>" segment.
 // Contextual generations add
 // ":avoyage-contextual:v<context_policy_version>" before any scope segment.
+// The endpoint adds a final ":u<sha256_digest>" segment.
 // Every segment is derived from the effective config (or a code-level
 // version constant), so changing the embedding model/dimension, any
 // preprocessing toggle, the truncation cap, or the embed-worker output
@@ -489,7 +492,23 @@ func (c *Config) GenerationFingerprint() string {
 	if scopeFP := c.Embed.Scope.BuildScope().Fingerprint(); scopeFP != "" {
 		fp = fmt.Sprintf("%s:s%s", fp, scopeFP)
 	}
-	return fp
+	return fp + ":u" + c.Embeddings.EndpointFingerprint()
+}
+
+// EndpointFingerprint identifies the embedding destination without exposing its URL.
+func (e EmbeddingsConfig) EndpointFingerprint() string {
+	endpoint := strings.TrimRight(e.Endpoint, "/")
+	if e.EffectiveAPIFormat() == APIFormatOpenAI {
+		canonical, err := embedconfig.CanonicalEndpoint(e.Endpoint, true)
+		if err != nil {
+			endpoint = strings.TrimSpace(e.Endpoint)
+		} else {
+			// Kit's embedclient appends /embeddings unless already present.
+			endpoint = strings.TrimSuffix(canonical, "/embeddings")
+		}
+	}
+	digest := sha256.Sum256([]byte(endpoint))
+	return hex.EncodeToString(digest[:])
 }
 
 // TaskPrefixFingerprint identifies document/query task-prefix policy without

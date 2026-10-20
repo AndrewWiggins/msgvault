@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.kenn.io/msgvault/internal/testutil/vectortest"
 	"go.kenn.io/msgvault/internal/vector"
 )
 
@@ -1875,4 +1876,30 @@ func TestFilteredMessageIDsRejectsLegacyListIDSchemaWithUpgradeGuidance(t *testi
 	_, err = b.filteredMessageIDs(ctx, vector.Filter{ListIDSubstrings: []string{"dev"}})
 	require.EqualError(t, err,
 		"List-Id filter requires messages.list_id; open the archive with a writable msgvault version first")
+}
+
+func TestBackend_AdoptEndpoint(t *testing.T) {
+	for _, mode := range []string{"writable", "read-only", "metadata-read-only", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			b, ctx := newBackendForTest(t)
+			opts := Options{Path: b.Path(), MainDB: b.mainDB, Dimension: 768}
+			reader, err := sql.Open(DriverName(), b.Path())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = reader.Close() })
+			vectortest.EndpointAdoption(t, b, reader, func(q string) string { return q }, func(hash string) vector.Backend {
+				require.NoError(t, b.Close())
+				opts.EndpointFingerprint = hash
+				opts.ReadOnly = mode == "read-only"
+				opts.MetadataReadOnly = mode == "metadata-read-only"
+				if mode == "empty" {
+					opts.EndpointFingerprint = ""
+				}
+				var err error
+				b, err = Open(ctx, opts)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = b.Close() })
+				return b
+			}, mode == "writable")
+		})
+	}
 }

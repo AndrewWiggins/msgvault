@@ -473,6 +473,64 @@ func TestPreprocessConfig_FingerprintChangesPerToggle(t *testing.T) {
 	}
 }
 
+func TestConfig_GenerationFingerprint_IncludesEndpoint(t *testing.T) {
+	assert := assert.New(t)
+	cfg := Config{Embeddings: EmbeddingsConfig{
+		Model: "nomic-embed-text", Dimension: 768, Endpoint: "http://localhost:11434/v1",
+	}}
+	want := "nomic-embed-text:768:p1-111111:c0:e1:u89caf70a6a58a082c8bd16cc0a4ad72d0a2ab0a8d0f495421057ebb5ce6460ee"
+	assert.Equal(want, cfg.GenerationFingerprint())
+	cfg.Embeddings.Endpoint = "HTTP://LocalHost:11434/v1/"
+	assert.Equal(want, cfg.GenerationFingerprint())
+	cfg.Embeddings.Endpoint = "https://other.example/v1"
+	assert.NotEqual(want, cfg.GenerationFingerprint())
+	cfg.Embeddings.Endpoint = "https://embed.example/token-in-path/v1"
+	assert.NotContains(cfg.GenerationFingerprint(), "token-in-path")
+	assert.NotContains(cfg.GenerationFingerprint(), "embed.example")
+}
+
+func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
+	cfg := Config{Embeddings: EmbeddingsConfig{
+		Model: "nomic-embed-text", Dimension: 768, Endpoint: "https://host/v1",
+	}}
+	baseline := cfg.GenerationFingerprint()
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		equal    bool
+	}{
+		{"default port", "https://host:443/v1", true},
+		{"uppercase scheme and host", "HTTPS://HOST/v1", true},
+		{"trailing slash", "https://host/v1/", true},
+		{"embeddings suffix", "https://host/v1/embeddings", true},
+		{"different path", "https://host/v2", false},
+		{"non-default port", "https://host:8443/v1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := cfg
+			cfg.Embeddings.Endpoint = tc.endpoint
+			if tc.equal {
+				assert.Equal(t, baseline, cfg.GenerationFingerprint())
+			} else {
+				assert.NotEqual(t, baseline, cfg.GenerationFingerprint())
+			}
+		})
+	}
+}
+
+func TestConfig_GenerationFingerprint_VoyageEndpointPath(t *testing.T) {
+	cfg := Config{Embeddings: EmbeddingsConfig{
+		APIFormat: APIFormatVoyageContextual, Model: "voyage-context-4", Dimension: 1024, Endpoint: "https://host/v1",
+	}}
+	cfg.ApplyDefaults()
+	baseline := cfg.GenerationFingerprint()
+	for _, endpoint := range []string{"https://host/v1/embeddings", "https://host/v1?", "https://host/v1#"} {
+		cfg.Embeddings.Endpoint = endpoint
+		assert.NotEqual(t, baseline, cfg.GenerationFingerprint())
+		assert.NoError(t, cfg.Embeddings.Validate())
+	}
+}
+
 // TestConfig_GenerationFingerprintFolds checks the full identifier
 // composition. The shape is
 // "<model>:<dim>:<preprocess>:c<maxchars>:e<embed_policy>" — every
@@ -485,7 +543,7 @@ func TestConfig_GenerationFingerprintFolds(t *testing.T) {
 		Embeddings: EmbeddingsConfig{Model: "nomic-embed", Dimension: 768, MaxInputChars: 6000},
 	}
 	got := base.GenerationFingerprint()
-	want := fmt.Sprintf("nomic-embed:768:p1-111111:c6000:e%d", embedPolicyVersion)
+	want := fmt.Sprintf("nomic-embed:768:p1-111111:c6000:e%d:ue3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", embedPolicyVersion)
 	assert.Equal(t, want, got)
 
 	// Flipping the model invalidates.
@@ -585,7 +643,7 @@ func TestConfig_GenerationFingerprint_IncludesEmbedPolicyVersion(t *testing.T) {
 		Embeddings: EmbeddingsConfig{Model: "m", Dimension: 8, MaxInputChars: 6000},
 	}
 	got := base.GenerationFingerprint()
-	suffix := fmt.Sprintf(":e%d", embedPolicyVersion)
+	suffix := fmt.Sprintf(":e%d:ue3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", embedPolicyVersion)
 	assert.True(t, strings.HasSuffix(got, suffix), "GenerationFingerprint() = %q, want suffix %q", got, suffix)
 }
 

@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil/vectortest"
 	"go.kenn.io/msgvault/internal/vector"
 )
 
@@ -650,5 +652,22 @@ func TestBackend_Search_SubjectFilter_CaseInsensitive(t *testing.T) {
 
 	if assert.Len(hits, 1, "escaped-wildcard subject filter hits") {
 		assert.Equal(int64(3), hits[0].MessageID, "want msg 3")
+	}
+}
+
+func TestBackend_AdoptEndpoint(t *testing.T) {
+	for _, mode := range []string{"writable", "read-only", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			b, ctx, db := newBackendForTest(t)
+			vectortest.EndpointAdoption(t, b, b.DB(), (&store.PostgreSQLDialect{}).Rebind, func(hash string) vector.Backend {
+				opts := Options{DB: db, Dimension: 768, SkipMigrate: true, ReadOnly: mode == "read-only", EndpointFingerprint: hash}
+				if mode == "empty" {
+					opts.EndpointFingerprint = ""
+				}
+				reopened, err := Open(ctx, opts)
+				require.NoError(t, err)
+				return reopened
+			}, mode == "writable")
+		})
 	}
 }

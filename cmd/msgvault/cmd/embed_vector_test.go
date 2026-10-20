@@ -13,11 +13,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/config"
@@ -399,6 +401,10 @@ func setupVectorFeaturesFixture(
 
 	vf, err := setupVectorFeatures(testCtx, s, mainPath, readOnly)
 	require.NoError(t, err)
+	if !c.Vector.AnyLaneEnabled() {
+		require.Nil(t, vf)
+		return nil
+	}
 	require.NotNil(t, vf)
 	t.Cleanup(func() { _ = vf.Close() })
 	return vf
@@ -1148,26 +1154,12 @@ func TestNewProgressPrinter_DoesNotBypassThrottleAfterInitialTotal(t *testing.T)
 }
 
 // Pin a pre-Kit generation, including its stored vector. Adopting the HTTP
-// client must neither schedule a rebuild nor replace the persisted identity.
+// client must preserve the generation and keep its vectors searchable.
 func TestKitMigrationReusesExistingGenerationForIndexAndSearch(t *testing.T) {
+	assert := assert.New(t)
+	must := require.New(t)
 	ctx := t.Context()
-	backend := openTestBackend(t)
 	const fingerprint = "legacy-model:4:p1-111111:c32768:e1"
-	cfg := vector.Config{Embeddings: vector.EmbeddingsConfig{Model: "legacy-model", Dimension: 4}}
-	cfg.ApplyDefaults()
-	require.Equal(t, fingerprint, cfg.GenerationFingerprint())
-	generation, err := backend.CreateGeneration(ctx, "legacy-model", 4, fingerprint)
-	require.NoError(t, err)
-	require.NoError(t, backend.Upsert(ctx, generation, []vector.Chunk{{MessageID: 1, Vector: []float32{1, 0, 0, 0}}}))
-	require.NoError(t, backend.ActivateGeneration(ctx, generation, true))
-
-	got, rebuilding, err := pickEmbedGeneration(ctx, backend, embedGenerationOpts{
-		Model: cfg.Embeddings.Model, Dimension: 4, Fingerprint: cfg.GenerationFingerprint(), Stderr: openStderrSink(t),
-	})
-	require.NoError(t, err)
-	assert.Equal(t, generation, got)
-	assert.False(t, rebuilding)
-
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -1178,22 +1170,51 @@ func TestKitMigrationReusesExistingGenerationForIndexAndSearch(t *testing.T) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		assert.Equal(t, []string{"find existing message"}, request.Input)
+		assert.Equal([]string{"find existing message"}, request.Input)
 		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[1,0,0,0]}]}`))
 	}))
 	t.Cleanup(server.Close)
-	client := embed.NewClient(embed.Config{Endpoint: server.URL, Model: cfg.Embeddings.Model, Dimension: 4})
-	engine := hybrid.NewEngine(backend, nil, client, hybrid.Config{ExpectedFingerprint: cfg.GenerationFingerprint()})
-	hits, metadata, err := engine.Search(ctx, hybrid.SearchRequest{Mode: hybrid.ModeVector, FreeText: "find existing message", Limit: 10})
-	require.NoError(t, err)
-	require.Len(t, hits, 1)
-	assert.Equal(t, int64(1), hits[0].MessageID)
-	assert.Equal(t, generation, metadata.Generation.ID)
-	assert.Equal(t, fingerprint, metadata.Generation.Fingerprint)
-	assert.Equal(t, int32(1), requests.Load(), "only the query is embedded")
+	var generation vector.GenerationID
+	vf := setupVectorFeaturesFixture(t, vector.APIFormatOpenAI, false, func(c *config.Config) {
+		c.Vector.Embeddings.Model = "legacy-model"
+		c.Vector.Embeddings.Endpoint = server.URL
+		mainStore, err := store.Open(filepath.Join(c.Data.DataDir, "msgvault.db"))
+		must.NoError(err)
+		defer func() { assert.NoError(mainStore.Close()) }()
+		must.NoError(mainStore.InitSchema())
+		_, err = mainStore.DB().Exec(`
+			INSERT INTO sources (id, source_type, identifier) VALUES (1, 'gmail', 'legacy@example.test');
+			INSERT INTO conversations (id, source_id, conversation_type) VALUES (1, 1, 'email_thread');
+			INSERT INTO messages (id, conversation_id, source_id, source_message_id, message_type)
+			VALUES (1, 1, 1, 'legacy-message', 'email');
+		`)
+		must.NoError(err)
+		b, err := sqlitevec.Open(ctx, sqlitevec.Options{Path: c.Vector.DBPath, Dimension: 4})
+		must.NoError(err)
+		defer func() { assert.NoError(b.Close()) }()
+		generation, err = b.CreateGeneration(ctx, "legacy-model", 4, fingerprint)
+		must.NoError(err)
+		must.NoError(b.Upsert(ctx, generation, []vector.Chunk{{MessageID: 1, Vector: []float32{1, 0, 0, 0}}}))
+		must.NoError(b.ActivateGeneration(ctx, generation, true))
+	})
+	backend, cfg := vf.Backend, vf.Cfg
+	got, rebuilding, err := pickEmbedGeneration(ctx, backend, embedGenerationOpts{
+		Model: cfg.Embeddings.Model, Dimension: 4, Fingerprint: cfg.GenerationFingerprint(), Stderr: openStderrSink(t),
+	})
+	must.NoError(err)
+	assert.Equal(generation, got)
+	assert.False(rebuilding)
+
+	hits, metadata, err := vf.HybridEngine.Search(ctx, hybrid.SearchRequest{Mode: hybrid.ModeVector, FreeText: "find existing message", Limit: 10})
+	must.NoError(err)
+	must.Len(hits, 1)
+	assert.Equal(int64(1), hits[0].MessageID)
+	assert.Equal(generation, metadata.Generation.ID)
+	assert.Equal(cfg.GenerationFingerprint(), metadata.Generation.Fingerprint)
+	assert.Equal(int32(1), requests.Load(), "only the query is embedded")
 	building, err := backend.BuildingGeneration(ctx)
-	require.NoError(t, err)
-	assert.Nil(t, building)
+	must.NoError(err)
+	assert.Nil(building)
 
 	for _, change := range []struct {
 		name  string
@@ -1203,12 +1224,91 @@ func TestKitMigrationReusesExistingGenerationForIndexAndSearch(t *testing.T) {
 		{"recipe", func(c *vector.Config) { c.Embeddings.MaxInputChars++ }},
 	} {
 		t.Run(change.name, func(t *testing.T) {
+			require := require.New(t)
 			changed := cfg
 			change.apply(&changed)
 			_, err := vector.ResolveActiveForFingerprint(ctx, backend, changed.GenerationFingerprint())
-			require.ErrorIs(t, err, vector.ErrIndexStale)
+			require.ErrorIs(err, vector.ErrIndexStale)
 			_, _, err = pickEmbedGeneration(ctx, backend, embedGenerationOpts{Model: changed.Embeddings.Model, Dimension: 4, Fingerprint: changed.GenerationFingerprint(), Stderr: openStderrSink(t)})
-			require.ErrorIs(t, err, vector.ErrIndexStale)
+			require.ErrorIs(err, vector.ErrIndexStale)
 		})
 	}
+}
+
+func TestSetupVectorFeatures_AdoptsLegacyEndpointFingerprint(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		t.Run(strconv.FormatBool(enabled), func(t *testing.T) {
+			const legacy = "text-embedding-test:4:p1-111111:c32768:e1"
+			var generation vector.GenerationID
+			var vecPath string
+			vf := setupVectorFeaturesFixture(t, vector.APIFormatOpenAI, false, func(c *config.Config) {
+				c.Vector.Enabled = enabled
+				vecPath = c.Vector.DBPath
+				b, err := sqlitevec.Open(t.Context(), sqlitevec.Options{
+					Path: c.Vector.DBPath, Dimension: 4,
+				})
+				require.NoError(t, err)
+				defer func() { assert.NoError(t, b.Close()) }()
+				generation, err = b.CreateGeneration(t.Context(), "text-embedding-test", 4, legacy)
+				require.NoError(t, err)
+				require.NoError(t, b.ActivateGeneration(t.Context(), generation, true))
+			})
+			if !enabled {
+				require.Nil(t, vf)
+				b, err := sqlitevec.Open(t.Context(), sqlitevec.Options{Path: vecPath, MetadataReadOnly: true})
+				require.NoError(t, err)
+				defer func() { assert.NoError(t, b.Close()) }()
+				active, err := b.ActiveGeneration(t.Context())
+				require.NoError(t, err)
+				assert.Equal(t, legacy, active.Fingerprint)
+				return
+			}
+			active, err := vector.ResolveActiveForFingerprint(t.Context(), vf.Backend, vf.Cfg.GenerationFingerprint())
+			require.NoError(t, err)
+			assert.Equal(t, generation, active.ID)
+		})
+	}
+}
+
+func TestRunEmbed_AdoptsLegacyEndpointBeforeGenerationSelection(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	var embedded int
+	server := fakeEmbeddingsServer(t, &embedded)
+	dataDir := t.TempDir()
+	seedTwoAccountMainDB(t, dataDir)
+	c := &config.Config{}
+	c.Data.DataDir = dataDir
+	c.Vector.Enabled = true
+	c.Vector.DBPath = filepath.Join(dataDir, "vectors.db")
+	c.Vector.Embeddings = vector.EmbeddingsConfig{Model: "test-model", Dimension: 4, Endpoint: server.URL}
+	c.Vector.ApplyDefaults()
+	backend, err := sqlitevec.Open(t.Context(), sqlitevec.Options{Path: c.Vector.DBPath, Dimension: 4})
+	require.NoError(err)
+	id, err := backend.CreateGeneration(t.Context(), "test-model", 4, "test-model:4:p1-111111:c32768:e1")
+	require.NoError(err)
+	require.NoError(backend.ActivateGeneration(t.Context(), id, true))
+	require.NoError(backend.Close())
+
+	oldRebuild, oldBackstop := embedFullRebuild, embedBackstop
+	oldAccounts, oldCollections := embedAccounts, embedCollections
+	t.Cleanup(func() {
+		embedFullRebuild, embedBackstop = oldRebuild, oldBackstop
+		embedAccounts, embedCollections = oldAccounts, oldCollections
+	})
+	embedFullRebuild, embedBackstop = false, false
+	embedAccounts, embedCollections = nil, nil
+	cmd := &cobra.Command{}
+	cmd.SetContext(testInvocationContext(t.Context(), c, invocationOptions{}))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	require.NoError(runEmbed(cmd))
+	assert.Equal(2, embedded)
+
+	backend, err = sqlitevec.Open(t.Context(), sqlitevec.Options{Path: c.Vector.DBPath, Dimension: 4})
+	require.NoError(err)
+	defer func() { assert.NoError(backend.Close()) }()
+	active, err := vector.ResolveActiveForFingerprint(t.Context(), backend, c.Vector.GenerationFingerprint())
+	require.NoError(err)
+	assert.Equal(id, active.ID)
 }

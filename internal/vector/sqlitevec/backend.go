@@ -33,6 +33,9 @@ var _ vector.OrphanEmbeddingPruner = (*Backend)(nil)
 
 // Options configures how Open establishes a Backend.
 type Options struct {
+	// EndpointFingerprint adopts legacy generations on writable opens; empty skips adoption.
+	EndpointFingerprint string
+
 	Path       string
 	MainPath   string            // filesystem path to msgvault.db; required for FusedSearch
 	Dimension  int               // default dimension for EnsureVectorTable at open
@@ -174,6 +177,12 @@ func Open(ctx context.Context, opts Options) (*Backend, error) {
 	if err := b.BackfillEmbedGenForUpgrade(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("embed_gen upgrade backfill: %w", err)
+	}
+	if !opts.ReadOnly {
+		if err := vector.AdoptEndpoint(ctx, db, func(q string) string { return q }, opts.EndpointFingerprint); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("adopt endpoint: %w", err)
+		}
 	}
 	// Drop the dead pending_embeddings queue table now that the backfill has
 	// consulted it: the backfill preserves the table's legacy

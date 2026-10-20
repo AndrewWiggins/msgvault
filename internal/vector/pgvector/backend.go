@@ -37,6 +37,8 @@ const annOverFetchFactor = 4
 // embedding schema and the main msgvault schema; pgvector embeddings
 // live in the same Postgres database.
 type Options struct {
+	// EndpointFingerprint adopts legacy generations on writable opens; empty skips adoption.
+	EndpointFingerprint string
 	// DB is the pgx-backed handle to the database that contains both
 	// the msgvault main schema and the pgvector embedding tables.
 	DB *sql.DB
@@ -136,6 +138,9 @@ func Open(ctx context.Context, opts Options) (*Backend, error) {
 		// where writes are rejected anyway.
 		if err := b.BackfillEmbedGenForUpgrade(ctx); err != nil {
 			return nil, fmt.Errorf("embed_gen upgrade backfill: %w", err)
+		}
+		if err := vector.AdoptEndpoint(ctx, opts.DB, (&store.PostgreSQLDialect{}).Rebind, opts.EndpointFingerprint); err != nil {
+			return nil, fmt.Errorf("adopt endpoint: %w", err)
 		}
 		// Drop the dead pending_embeddings queue table now that the backfill has
 		// consulted it: the backfill preserves the table's legacy

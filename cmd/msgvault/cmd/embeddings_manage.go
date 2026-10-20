@@ -836,6 +836,10 @@ func openEmbeddingsBackendWithMode(ctx context.Context, readOnly bool) (vector.B
 		return nil, nil, errors.New("configuration is unavailable")
 	}
 	cfg := state.cfg
+	endpointFP := ""
+	if cfg.Vector.Enabled && !readOnly {
+		endpointFP = cfg.Vector.Embeddings.EndpointFingerprint()
+	}
 	dsn := cfg.DatabaseDSN()
 	if store.IsPostgresURL(dsn) {
 		db, cleanup, err := openEmbeddingsPostgres(ctx, dsn, readOnly)
@@ -845,6 +849,8 @@ func openEmbeddingsBackendWithMode(ctx context.Context, readOnly bool) (vector.B
 		// Writable management opens still apply extension-less upgrades. Listing
 		// sets both ReadOnly and SkipMigrate to avoid schema work and backfills.
 		b, err := pgvector.Open(ctx, pgvector.Options{
+			EndpointFingerprint: endpointFP,
+
 			DB:          db,
 			Dimension:   cfg.Vector.Embeddings.Dimension,
 			SkipMigrate: true,
@@ -890,6 +896,8 @@ func openEmbeddingsBackendWithMode(ctx context.Context, readOnly bool) (vector.B
 		return nil, nil, fmt.Errorf("open main db for embeddings backend: %w", err)
 	}
 	b, err := sqlitevec.Open(ctx, sqlitevec.Options{
+		EndpointFingerprint: endpointFP,
+
 		Path:             vecPath,
 		MetadataReadOnly: readOnly,
 		MainPath:         dsn,

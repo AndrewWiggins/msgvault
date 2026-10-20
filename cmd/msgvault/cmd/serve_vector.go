@@ -555,6 +555,10 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 		lastModifiedExpr = "m.last_modified"
 	}
 
+	endpointFP := ""
+	if vecCfg.Enabled && !readOnly {
+		endpointFP = vecCfg.Embeddings.EndpointFingerprint()
+	}
 	var (
 		backend         vector.Backend
 		documentBackend vectordocument.Backend
@@ -565,6 +569,8 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 		// Same database handle as the main store: pgvector embeddings
 		// live alongside messages, so there is no separate vectors.db.
 		pgb, err := pgvector.Open(ctx, pgvector.Options{
+			EndpointFingerprint: endpointFP,
+
 			DB:          mainDB,
 			Dimension:   vecCfg.Embeddings.Dimension,
 			BuildScope:  vecCfg.Embed.Scope.BuildScope(),
@@ -596,6 +602,8 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 			vecPath = filepath.Join(cfg.Data.DataDir, "vectors.db")
 		}
 		sb, err := sqlitevec.Open(ctx, sqlitevec.Options{
+			EndpointFingerprint: endpointFP,
+
 			Path:            vecPath,
 			MainPath:        mainPath,
 			Dimension:       vecCfg.Embeddings.Dimension,

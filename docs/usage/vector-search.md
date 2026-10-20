@@ -509,13 +509,13 @@ For ingest paths that do not immediately schedule embedding work, running
 normal incremental pass skips. A full rebuild is needed when the model or
 index policy changes, or when you want to replace the whole generation.
 
-A same-model full
-rebuild is atomic from the searcher's perspective: vector and hybrid
+A full rebuild with the same endpoint, model, and dimension
+is atomic from the searcher's perspective: vector and hybrid
 queries keep answering from the previous active generation until the
 new one is ready. That previous active generation is intentionally frozen
 during the rebuild, so messages synced after the rebuild starts may not appear
 in vector or hybrid results until the building generation activates. If the
-rebuild changes the configured model or
+rebuild changes the configured endpoint, model, or
 dimension, vector and hybrid queries return `index_stale` until the
 new generation activates.
 
@@ -733,7 +733,7 @@ filtering.
 
 ## Model Rotation
 
-To switch models, dimensions, task prefixes, preprocessing settings, or
+To switch endpoints, models, dimensions, task prefixes, preprocessing settings, or
 `max_input_chars`, update your config, then run:
 
 ```bash
@@ -742,7 +742,7 @@ msgvault embeddings build --full-rebuild --yes
 
 This builds a new generation with the new fingerprint and activates
 it atomically when the build completes. The fingerprint includes the
-API format, model, dimension, task prefixes, preprocessing policy, `max_input_chars`,
+endpoint, API format, model, dimension, task prefixes, preprocessing policy, `max_input_chars`,
 embedding output policy, and [scope](#scoped-generations). While the rebuild is in flight,
 `mode=vector` and `mode=hybrid` return `index_stale` (the
 previously-active generation no longer matches the configured
@@ -751,6 +751,9 @@ results). On the CLI or HTTP API, use `mode=fts` until the new generation
 activates; it does not depend on the vector index. In MCP, omit `mode` for
 metadata search or use `search_message_bodies`. Once `msgvault embeddings
 build` reports the new generation activated, vector and hybrid modes resume.
+
+An older index records the configured endpoint at the first writable vector start with vectors enabled; an endpoint change made before that start goes undetected.
+Downgrading afterward reports `index_stale`.
 
 ## Troubleshooting
 
@@ -764,7 +767,7 @@ body keywords.
 | Error | Meaning | Recovery |
 |---|---|---|
 | `vector_not_enabled` | The server or MCP process did not wire a vector backend, usually because `[vector] enabled = false`. | Set `enabled = true`, configure `[vector.embeddings]`, and start with a build that includes the needed backend (`sqlite_vec` or `pgvector`). |
-| `index_stale` | Active generation's fingerprint does not match the current embedding settings: model, dimension, task prefixes, preprocessing policy, `max_input_chars`, output policy, or scope. | For an existing account-scoped index built with CLI flags, set matching `[vector.embed.scope].accounts` and restart the daemon. Otherwise run `msgvault embeddings build --full-rebuild --yes`. |
+| `index_stale` | Active generation's fingerprint does not match the current embedding settings: endpoint, model, dimension, task prefixes, preprocessing policy, `max_input_chars`, output policy, or scope. | For an existing account-scoped index built with CLI flags, set matching `[vector.embed.scope].accounts` and restart the daemon. Otherwise run `msgvault embeddings build --full-rebuild --yes`. |
 | `index_building` | No active generation yet; one is being built. | Finish running `msgvault embeddings build`, wait for the scheduler, or use the appropriate non-vector fallback. |
 | `missing_free_text` | `mode=vector` or `mode=hybrid` used with a filter-only query (no free text to embed). | Add free-text terms to `q`, or use the appropriate non-vector fallback. |
 | `index_scope_mismatch` | The active vector generation was built for selected message types and the query is unscoped or asks for a type outside that scope. | Add a compatible `message_type` filter, use the appropriate non-vector fallback, or rebuild an unscoped generation. |

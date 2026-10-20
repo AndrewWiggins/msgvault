@@ -62,6 +62,10 @@ func runEmbed(cmd *cobra.Command) error {
 		return err
 	}
 
+	endpointFP := ""
+	if cfg.Vector.Enabled {
+		endpointFP = cfg.Vector.Embeddings.EndpointFingerprint()
+	}
 	var (
 		backend   vector.Backend
 		vectorsDB *sql.DB
@@ -79,6 +83,8 @@ func runEmbed(cmd *cobra.Command) error {
 		// dialect-aware via rebind, so the build pipeline runs directly
 		// against pgx.
 		pgb, err := pgvector.Open(ctx, pgvector.Options{
+			EndpointFingerprint: endpointFP,
+
 			DB:            s.DB(),
 			Dimension:     cfg.Vector.Embeddings.Dimension,
 			BuildScope:    cfg.Vector.Embed.Scope.BuildScope(),
@@ -101,6 +107,8 @@ func runEmbed(cmd *cobra.Command) error {
 			vecPath = filepath.Join(cfg.Data.DataDir, "vectors.db")
 		}
 		sb, err := sqlitevec.Open(ctx, sqlitevec.Options{
+			EndpointFingerprint: endpointFP,
+
 			Path:            vecPath,
 			MainPath:        cfg.DatabaseDSN(),
 			Dimension:       cfg.Vector.Embeddings.Dimension,
