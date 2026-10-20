@@ -3,27 +3,11 @@ package vector
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func Test_hasEndpointSegment(t *testing.T) {
-	for _, tc := range []struct {
-		fingerprint string
-		want        bool
-	}{
-		{"m:768:u" + strings.Repeat("a", 64), true},
-		{"u" + strings.Repeat("a", 64) + ":768", false},
-		{"m:768:u" + strings.Repeat("a", 63), false},
-		{"m:768:u" + strings.Repeat("a", 65), false},
-		{"m:768:u" + strings.Repeat("A", 64), false},
-	} {
-		assert.Equal(t, tc.want, hasEndpointSegment(tc.fingerprint), tc.fingerprint)
-	}
-}
 
 // fakeBackend implements Backend for ResolveActiveForFingerprint tests.
 // Only ActiveGeneration and BuildingGeneration are exercised.

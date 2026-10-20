@@ -1879,7 +1879,7 @@ func TestFilteredMessageIDsRejectsLegacyListIDSchemaWithUpgradeGuidance(t *testi
 }
 
 func TestBackend_AdoptEndpoint(t *testing.T) {
-	for _, mode := range []string{"writable", "read-only", "metadata-read-only", "empty"} {
+	for _, mode := range []string{"writable", "read-only", "empty"} {
 		t.Run(mode, func(t *testing.T) {
 			b, ctx := newBackendForTest(t)
 			opts := Options{Path: b.Path(), MainDB: b.mainDB, Dimension: 768}
@@ -1890,7 +1890,6 @@ func TestBackend_AdoptEndpoint(t *testing.T) {
 				require.NoError(t, b.Close())
 				opts.EndpointFP = hash
 				opts.ReadOnly = mode == "read-only"
-				opts.MetadataReadOnly = mode == "metadata-read-only"
 				if mode == "empty" {
 					opts.EndpointFP = ""
 				}

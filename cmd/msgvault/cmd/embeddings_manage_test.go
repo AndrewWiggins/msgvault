@@ -402,8 +402,8 @@ func assertManualGenerationState(t *testing.T, gen vector.GenerationID, want vec
 }
 
 func TestEmbeddingsActivate_AdoptsLegacyEndpoint(t *testing.T) {
-	for _, plan := range []bool{false, true} {
-		t.Run(strconv.FormatBool(plan), func(t *testing.T) {
+	for _, mode := range []string{"run", "plan"} {
+		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			c := config.NewDefaultConfig()
 			c.HomeDir = dir
@@ -440,7 +440,7 @@ INSERT INTO messages (id, conversation_id, source_id, source_message_id, message
 			previousContext := embeddingsActivateCmd.Context()
 			embeddingsActivateCmd.SetContext(ctx)
 			t.Cleanup(func() { embeddingsActivateCmd.SetContext(previousContext) })
-			if plan {
+			if mode == "plan" {
 				response, err := planCLIEmbeddingsActivate(ctx, gen, false)
 				require.NoError(t, err)
 				assert.Contains(t, response.Prompt, c.Vector.GenerationFingerprint())

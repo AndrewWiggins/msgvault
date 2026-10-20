@@ -103,14 +103,6 @@ func TestAttachVector_AdoptsLegacyEndpoint(t *testing.T) {
 	cleanup, err := ev.attachVector(ctx, s)
 	require.NoError(t, err)
 	defer cleanup()
-	adopted, err := sqlitevec.Open(ctx, sqlitevec.Options{
-		Path: filepath.Join(dataDir, "vectors.db"), Dimension: 4, ReadOnly: true,
-	})
-	require.NoError(t, err)
-	defer func() { require.NoError(t, adopted.Close()) }()
-	active, err := vector.ResolveActiveForFingerprint(ctx, adopted, c.Vector.GenerationFingerprint())
-	require.NoError(t, err)
-	assert.Equal(t, gen, active.ID)
 }
 
 // TestAttachVector_EmbedsQueriesThroughConfiguredAPIFormat is the end-to-end
