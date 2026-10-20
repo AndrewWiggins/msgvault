@@ -851,12 +851,12 @@ func openEmbeddingsBackendWithMode(ctx context.Context, readOnly bool) (vector.B
 		// Writable management opens still apply extension-less upgrades. Listing
 		// sets both ReadOnly and SkipMigrate to avoid schema work and backfills.
 		b, err := pgvector.Open(ctx, pgvector.Options{
-			EndpointFingerprint: endpointFP,
-			DB:                  db,
-			Dimension:           cfg.Vector.Embeddings.Dimension,
-			SkipMigrate:         true,
-			ReadOnly:            readOnly,
-			BuildScope:          cfg.Vector.Embed.Scope.BuildScope(),
+			EndpointFP:  endpointFP,
+			DB:          db,
+			Dimension:   cfg.Vector.Embeddings.Dimension,
+			SkipMigrate: true,
+			ReadOnly:    readOnly,
+			BuildScope:  cfg.Vector.Embed.Scope.BuildScope(),
 		})
 		if err != nil {
 			_ = db.Close()
@@ -897,16 +897,16 @@ func openEmbeddingsBackendWithMode(ctx context.Context, readOnly bool) (vector.B
 		return nil, nil, fmt.Errorf("open main db for embeddings backend: %w", err)
 	}
 	b, err := sqlitevec.Open(ctx, sqlitevec.Options{
-		EndpointFingerprint: endpointFP,
-		Path:                vecPath,
-		MetadataReadOnly:    readOnly,
-		MainPath:            dsn,
-		Dimension:           cfg.Vector.Embeddings.Dimension,
-		MainDB:              mainStore.DB(),
-		BuildScope:          cfg.Vector.Embed.Scope.BuildScope(),
-		ANNOversample:       cfg.Vector.Search.ANNOversample,
-		ANNNProbe:           cfg.Vector.Search.ANNNProbe,
-		AcceleratorMode:     cfg.Vector.Search.SQLiteAccelerator,
+		EndpointFP:       endpointFP,
+		Path:             vecPath,
+		MetadataReadOnly: readOnly,
+		MainPath:         dsn,
+		Dimension:        cfg.Vector.Embeddings.Dimension,
+		MainDB:           mainStore.DB(),
+		BuildScope:       cfg.Vector.Embed.Scope.BuildScope(),
+		ANNOversample:    cfg.Vector.Search.ANNOversample,
+		ANNNProbe:        cfg.Vector.Search.ANNNProbe,
+		AcceleratorMode:  cfg.Vector.Search.SQLiteAccelerator,
 	})
 	if err != nil {
 		_ = mainStore.Close()

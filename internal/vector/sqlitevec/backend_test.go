@@ -1888,11 +1888,11 @@ func TestBackend_AdoptEndpoint(t *testing.T) {
 			t.Cleanup(func() { _ = reader.Close() })
 			vectortest.EndpointAdoption(t, b, reader, func(q string) string { return q }, func(hash string) vector.Backend {
 				require.NoError(t, b.Close())
-				opts.EndpointFingerprint = hash
+				opts.EndpointFP = hash
 				opts.ReadOnly = mode == "read-only"
 				opts.MetadataReadOnly = mode == "metadata-read-only"
 				if mode == "empty" {
-					opts.EndpointFingerprint = ""
+					opts.EndpointFP = ""
 				}
 				var err error
 				b, err = Open(ctx, opts)

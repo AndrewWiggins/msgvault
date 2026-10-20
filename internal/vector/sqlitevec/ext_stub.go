@@ -32,7 +32,7 @@ func Available() bool { return false }
 // can reference sqlitevec.Options without a compile error; the struct is
 // never populated at runtime when the PG code path is taken.
 type Options struct {
-	EndpointFingerprint string
+	EndpointFP string
 
 	Path             string
 	MainPath         string

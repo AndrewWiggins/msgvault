@@ -33,8 +33,8 @@ var _ vector.OrphanEmbeddingPruner = (*Backend)(nil)
 
 // Options configures how Open establishes a Backend.
 type Options struct {
-	// EndpointFingerprint adopts legacy generations on writable opens; empty skips adoption.
-	EndpointFingerprint string
+	// EndpointFP adopts legacy generations on writable opens; empty skips adoption.
+	EndpointFP string
 
 	Path       string
 	MainPath   string            // filesystem path to msgvault.db; required for FusedSearch
@@ -179,7 +179,7 @@ func Open(ctx context.Context, opts Options) (*Backend, error) {
 		return nil, fmt.Errorf("embed_gen upgrade backfill: %w", err)
 	}
 	if !opts.ReadOnly {
-		if err := vector.AdoptEndpoint(ctx, db, func(q string) string { return q }, opts.EndpointFingerprint); err != nil {
+		if err := vector.AdoptEndpoint(ctx, db, func(q string) string { return q }, opts.EndpointFP); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("adopt endpoint: %w", err)
 		}

@@ -22,7 +22,7 @@ var ErrNotBuilt = errors.New(
 // builds can compile call sites that reference it. None of the fields
 // are read because Open() always fails.
 type Options struct {
-	EndpointFingerprint string
+	EndpointFP string
 
 	DB            *sql.DB
 	Dimension     int
