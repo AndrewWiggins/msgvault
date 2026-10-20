@@ -39,7 +39,7 @@ func TestActivityTriggerMigrationRequeuesProjectedUnsentMessages(t *testing.T) {
 }
 
 func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
-	for _, mergeKind := range []string{"direct", "chained", "survivor"} {
+	for _, mergeKind := range []string{"direct", "chained", "survivor", "chained-survivor"} {
 		t.Run(mergeKind, func(t *testing.T) {
 			require := require.New(t)
 			assert := assert.New(t)
@@ -61,7 +61,7 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			require.NoError(err)
 			_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
 			require.NoError(err)
-			if mergeKind == "survivor" {
+			if mergeKind == "survivor" || mergeKind == "chained-survivor" {
 				historicalID := messageID
 				messageID = f.NewMessage().WithSentAt(occurredAt).Create(t, f.Store)
 				_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
@@ -70,23 +70,40 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 				require.NoError(err)
 				_, err = activityExec(f.Store, `UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, historicalID)
 				require.NoError(err)
-				// The older daemon already processed the hidden historical row.
-				_, err = activityExec(f.Store, `DELETE FROM activity_projection_queue WHERE message_id = ?`, historicalID)
-				require.NoError(err)
+			}
+			var finalSurvivorID int64
+			if mergeKind == "chained-survivor" {
+				finalSurvivorID = f.NewMessage().WithSentAt(occurredAt).Create(t, f.Store)
 			}
 			_, err = activityExec(f.Store, `INSERT INTO source_settings(source_id, history_only, merged_into_source_id, retired_at)
 		VALUES (?, TRUE, ?, CURRENT_TIMESTAMP)`, f.Source.ID, destination.ID)
 			require.NoError(err)
-			if mergeKind == "chained" {
+			if mergeKind == "chained" || mergeKind == "chained-survivor" {
 				intermediate := destination
 				destination, err = f.Store.GetOrCreateSource("imap", "final@example.invalid")
 				require.NoError(err)
-				_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
+				if mergeKind == "chained-survivor" {
+					historicalID := messageID
+					messageID = finalSurvivorID
+					_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
+					require.NoError(err)
+					_, err = activityExec(f.Store, `INSERT INTO source_merge_messages
+			(message_id, original_source_id, original_message_id, survivor_message_id)
+			SELECT id, source_id, source_message_id, ? FROM messages WHERE id = ?`, messageID, historicalID)
+					require.NoError(err)
+					_, err = activityExec(f.Store, `UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, historicalID)
+					require.NoError(err)
+				}
+				_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE source_id = ?`, destination.ID, intermediate.ID)
 				require.NoError(err)
 				_, err = activityExec(f.Store, `INSERT INTO source_settings(source_id, history_only, merged_into_source_id, retired_at)
 			VALUES (?, TRUE, ?, CURRENT_TIMESTAMP)`, intermediate.ID, destination.ID)
 				require.NoError(err)
 			}
+			// The older daemon already processed the hidden historical rows.
+			_, err = activityExec(f.Store, `DELETE FROM activity_projection_queue
+		WHERE message_id IN (SELECT id FROM messages WHERE source_id = ? AND deleted_at IS NOT NULL)`, destination.ID)
+			require.NoError(err)
 			projection := activityProjectionForMessage(t, f, messageID, personID, occurredAt)
 			require.False(projection.Token.Unsent, "the old merge hid the only draft evidence")
 			_, err = f.Store.ProjectActivityBatchContext(t.Context(), []store.ActivityProjection{projection})

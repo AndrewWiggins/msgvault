@@ -10,7 +10,7 @@ import (
 )
 
 func (s *Store) applySourceMergePlan(ctx context.Context, tx *loggedTx, from, into int64, plan sourceMergePlan) error {
-	if err := preserveMergedIMAPDrafts(ctx, tx, from, from); err != nil {
+	if err := preserveMergedIMAPDrafts(ctx, tx, from, from, into); err != nil {
 		return fmt.Errorf("preserve merged IMAP draft evidence: %w", err)
 	}
 	conversations := map[int64]int64{}
@@ -261,26 +261,33 @@ func backfillMergedIMAPDrafts(ctx context.Context, tx *loggedTx) error {
 		return err
 	}
 	for _, pair := range pairs {
-		if err := preserveMergedIMAPDrafts(ctx, tx, pair[0], pair[1]); err != nil {
+		if err := preserveMergedIMAPDrafts(ctx, tx, pair[0], pair[1], pair[1]); err != nil {
 			return err
 		}
 	}
 	// Current merges copy historical labels onto the visible survivor too.
-	_, err = tx.ExecContext(ctx, `INSERT INTO message_labels(message_id, label_id)
+	_, err = tx.ExecContext(ctx, `WITH RECURSIVE draft_survivors(message_id, label_id) AS (
  SELECT sm.survivor_message_id, ml.label_id
  FROM source_merge_messages sm JOIN message_labels ml ON ml.message_id = sm.message_id
  JOIN source_merge_preserved_labels p ON p.label_id = ml.label_id
  JOIN labels l ON l.id = ml.label_id
  WHERE sm.survivor_message_id IS NOT NULL AND l.system_role = 'drafts'
+ UNION
+ SELECT sm.survivor_message_id, ds.label_id
+ FROM draft_survivors ds JOIN source_merge_messages sm ON sm.message_id = ds.message_id
+ WHERE sm.survivor_message_id IS NOT NULL
+ )
+ INSERT INTO message_labels(message_id, label_id)
+ SELECT message_id, label_id FROM draft_survivors WHERE TRUE
  ON CONFLICT (message_id, label_id) DO NOTHING`)
 	return err
 }
 
-func preserveMergedIMAPDrafts(ctx context.Context, tx *loggedTx, membershipSource, messageSource int64) error {
+func preserveMergedIMAPDrafts(ctx context.Context, tx *loggedTx, membershipSource, messageSource, labelSource int64) error {
 	const selection = `SELECT m.id FROM messages m JOIN sources src ON src.id = m.source_id
  WHERE m.source_id = ?
- AND EXISTS (SELECT 1 FROM imap_message_memberships imm
- WHERE imm.message_id = m.id AND imm.source_id = ?
+ AND m.id IN (SELECT imm.message_id FROM imap_message_memberships imm
+ WHERE imm.source_id = ?
  AND LOWER(CAST(imm.flags AS TEXT)) LIKE '%"\\draft"%' ESCAPE '!')
  AND NOT EXISTS (SELECT 1 FROM message_labels ml JOIN labels l ON l.id = ml.label_id
  WHERE ml.message_id = m.id AND l.source_id = m.source_id
@@ -295,7 +302,7 @@ func preserveMergedIMAPDrafts(ctx context.Context, tx *loggedTx, membershipSourc
 	name := fmt.Sprintf("msgvault-archive:%d:imap-draft", membershipSource)
 	for {
 		var used bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM labels WHERE source_id = ? AND name = ?)`, messageSource, name).Scan(&used); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM labels WHERE source_id = ? AND name = ?)`, labelSource, name).Scan(&used); err != nil {
 			return err
 		}
 		if !used {
@@ -305,7 +312,7 @@ func preserveMergedIMAPDrafts(ctx context.Context, tx *loggedTx, membershipSourc
 	}
 	var labelID int64
 	if err := tx.QueryRowContext(ctx, `INSERT INTO labels(source_id, name, system_role)
- VALUES (?, ?, 'drafts') RETURNING id`, messageSource, name).Scan(&labelID); err != nil {
+ VALUES (?, ?, 'drafts') RETURNING id`, labelSource, name).Scan(&labelID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO source_merge_preserved_labels(label_id) VALUES (?)`, labelID); err != nil {
