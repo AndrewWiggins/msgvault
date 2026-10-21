@@ -1858,13 +1858,18 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 	if err := s.runOnceMigration(
 		ctx, migrationActivityProjectionTriggers, 1, false,
 		func(ctx context.Context) error {
-			return s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
+			return s.withAttributionTxContext(ctx, attributionLock{Exclusive: true}, func(tx *loggedTx) error {
+				if reset := s.dialect.MaintenanceTimeoutResetSQL(); reset != "" {
+					if _, err := tx.ExecContext(ctx, reset); err != nil {
+						return fmt.Errorf("disable maintenance statement timeout: %w", err)
+					}
+				}
 				if err := s.dialect.EnsureActivityProjectionTriggers(
 					boundQuerier{ctx: ctx, q: tx},
 				); err != nil {
 					return err
 				}
-				if err := backfillMergedIMAPDrafts(ctx, tx); err != nil {
+				if err := s.backfillMergedIMAPDrafts(ctx, tx); err != nil {
 					return fmt.Errorf("preserve previously merged IMAP drafts: %w", err)
 				}
 				_, err := tx.ExecContext(ctx, requeueActivityProjectionSQL(`

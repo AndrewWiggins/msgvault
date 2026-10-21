@@ -100,6 +100,14 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			VALUES (?, TRUE, ?, CURRENT_TIMESTAMP)`, intermediate.ID, destination.ID)
 				require.NoError(err)
 			}
+			_, err = f.Store.EnsureLabelsBatch(destination.ID, map[string]store.LabelInfo{
+				"Sent": {Name: "Sent", Type: "system", SystemRole: store.LabelSystemRoleSent},
+			})
+			require.NoError(err)
+			_, err = f.Store.RepairAccountAttributionContext(t.Context(), destination.ID, nil)
+			require.NoError(err)
+			_, path := attribution(t, f.Store, messageID)
+			require.Equal("inbound", path.String)
 			// The older daemon already processed the hidden historical rows.
 			_, err = activityExec(f.Store, `DELETE FROM activity_projection_queue
 		WHERE message_id IN (SELECT id FROM messages WHERE source_id = ? AND deleted_at IS NOT NULL)`, destination.ID)
@@ -114,6 +122,8 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			_, err = f.Store.DB().Exec(`DELETE FROM applied_migrations WHERE name = 'activity_projection_triggers_v5'`)
 			require.NoError(err)
 			require.NoError(f.Store.InitSchema())
+			_, path = attribution(t, f.Store, messageID)
+			assert.NotEqual("inbound", path.String, "preserved drafts must leave received-mail attribution")
 			queued, err = f.Store.LoadQueuedActivityCandidatesContext(t.Context(), 10)
 			require.NoError(err)
 			require.Len(queued, 1)

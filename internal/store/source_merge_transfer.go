@@ -240,7 +240,7 @@ func (s *Store) applySourceMergePlan(ctx context.Context, tx *loggedTx, from, in
 
 // Backfill flag-only drafts moved by older merges, including chained merges
 // whose provenance still points to the original membership source.
-func backfillMergedIMAPDrafts(ctx context.Context, tx *loggedTx) error {
+func (s *Store) backfillMergedIMAPDrafts(ctx context.Context, tx *loggedTx) error {
 	rows, err := tx.QueryContext(ctx, `SELECT sm.original_source_id, m.source_id
  FROM source_merge_messages sm JOIN messages m ON m.id = sm.message_id
  WHERE sm.original_source_id != m.source_id
@@ -280,7 +280,36 @@ func backfillMergedIMAPDrafts(ctx context.Context, tx *loggedTx) error {
  INSERT INTO message_labels(message_id, label_id)
  SELECT message_id, label_id FROM draft_survivors WHERE TRUE
  ON CONFLICT (message_id, label_id) DO NOTHING`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Refresh moved drafts and every survivor after all draft labels are in place.
+	rows, err = tx.QueryContext(ctx, `SELECT ml.message_id FROM message_labels ml
+ JOIN source_merge_preserved_labels p ON p.label_id = ml.label_id
+ JOIN labels l ON l.id = ml.label_id
+ WHERE l.system_role = 'drafts'
+ GROUP BY ml.message_id ORDER BY ml.message_id`)
+	if err != nil {
+		return err
+	}
+	var messageIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		messageIDs = append(messageIDs, id)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, id := range messageIDs {
+		if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, id, func() error { return nil }); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func preserveMergedIMAPDrafts(ctx context.Context, tx *loggedTx, membershipSource, messageSource, labelSource int64) error {
