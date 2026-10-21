@@ -2195,9 +2195,12 @@ enabled = false
 
 `MSGVAULT_TELEMETRY_ENABLED` in the environment that starts the daemon
 overrides the config: `0`, `false`, `no` or `off` turns telemetry off, and any
-other value turns it on. `TELEMETRY_ENABLED=0` also turns it off. A CLI command
-that starts a local daemon passes its environment to it. Builds made with the
-`kit_posthog_disabled` tag never send telemetry.
+other value turns it on. `TELEMETRY_ENABLED=0` and `DO_NOT_TRACK=1` also turn
+it off, and so does running in CI. Restart the daemon after changing these. The
+CLI and terminal UI honor the same opt-outs in their own environment. A CLI
+command that starts a local daemon passes its environment to it. Only release
+builds send telemetry, and builds made with the `kit_posthog_disabled` tag never
+do.
 
 ## File Locations
 
@@ -2217,7 +2220,7 @@ home; `[log].dir` can override the log location.
 | `logs/` | Structured log files (when [file logging](/docs/configuration/#log) is enabled) |
 | `analytics/` | Parquet cache files for Web UI and TUI analytical views |
 | `omi/` | Omi request pacing and provider cooldowns per backend and API key, shared by scheduled and manual syncs |
-| `telemetry-install.json` | Random anonymous install ID for [telemetry](#telemetry); created only while telemetry is on |
+| `telemetry-install.json` | Random anonymous install ID for [telemetry](#telemetry); created unless telemetry is turned off |
 | `telemetry-screen-views.json` | Current UTC day's screen, search, and message claims; created only while telemetry is on |
 
 ## Example configuration
