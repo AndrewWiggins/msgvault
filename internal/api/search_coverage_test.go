@@ -818,3 +818,23 @@ func TestSearchCoverageResolvesGenerationStateAndRefreshesStale(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchCoverageStaleRestartAdvice(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+	cfg := vector.Config{Enabled: true}
+	backend := &filteredCoverageBackend{active: vector.Generation{ID: 1, Fingerprint: cfg.GenerationFingerprint()}}
+	srv := NewServerWithOptions(ServerOptions{
+		Config: &config.Config{Vector: cfg}, Store: &mockStore{stats: &StoreStats{}},
+		Engine: newExploreDuckDBFixture(t), Backend: backend, VectorCfg: cfg, Logger: testLogger(),
+	})
+	srv.SetVectorRestartFingerprint(func(context.Context) (string, error) {
+		return "model-b", nil
+	})
+	backend.active = vector.Generation{ID: 2, Fingerprint: "model-b"}
+	body := getSearchCoverage(t, srv, `{}`)
+	assert.Equal(SearchCoverageStale, body.Status)
+	assert.Equal("model-b", body.VectorFingerprint)
+	assert.Contains(body.Detail, "msgvault daemon restart")
+	assert.NotContains(body.Actions, SearchCoverageActionBuildIndex)
+}
