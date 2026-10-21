@@ -1858,12 +1858,11 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 	if err := s.runOnceMigration(
 		ctx, migrationActivityProjectionTriggers, 1, false,
 		func(ctx context.Context) error {
-			return s.withAttributionTxContext(ctx, attributionLock{Exclusive: true}, func(tx *loggedTx) error {
-				if reset := s.dialect.MaintenanceTimeoutResetSQL(); reset != "" {
-					if _, err := tx.ExecContext(ctx, reset); err != nil {
-						return fmt.Errorf("disable maintenance statement timeout: %w", err)
-					}
+			return s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
+				if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+					return err
 				}
+				tx.attribution = &attributionLockState{exclusive: true}
 				if err := s.dialect.EnsureActivityProjectionTriggers(
 					boundQuerier{ctx: ctx, q: tx},
 				); err != nil {

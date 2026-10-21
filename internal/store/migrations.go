@@ -81,6 +81,7 @@ const (
 	// FTS bookkeeping sweeps no longer requeue the archive.
 	// v5: is_sent joined MessagesActivityColumns, and messages projected while
 	// unsent are requeued so the projector retracts them.
+	// v5 also restores draft evidence for flag-only IMAP drafts moved by earlier account merges.
 	migrationActivityProjectionTriggers = "activity_projection_triggers_v5"
 	migrationPersonInferenceProviderV2  = "person_inference_provider_v2"
 	migrationPersonSweepCallsV2         = "person_sweep_calls_v2"
