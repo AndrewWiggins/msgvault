@@ -65,7 +65,7 @@ func AdoptEndpoint(ctx context.Context, db *sql.DB, rebind func(string) string, 
 //
 // Error semantics:
 //   - ErrIndexStale: an active generation exists but its fingerprint
-//     does not match the supplied one.
+//     does not match the supplied one. The active generation is returned too.
 //   - ErrIndexBuilding: no active yet, but a first-ever build is in
 //     progress.
 //   - ErrNotEnabled: no generation exists at all (vector search not
@@ -76,7 +76,7 @@ func ResolveActiveForFingerprint(ctx context.Context, b Backend, fingerprint str
 	active, err := b.ActiveGeneration(ctx)
 	if err == nil {
 		if fingerprint != "" && active.Fingerprint != fingerprint {
-			return Generation{}, fmt.Errorf("%w: active=%q configured=%q",
+			return active, fmt.Errorf("%w: active=%q configured=%q",
 				ErrIndexStale, active.Fingerprint, fingerprint)
 		}
 		return active, nil
