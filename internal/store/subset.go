@@ -888,6 +888,9 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 	if err := markSubsetDraftsAuthored(tx); err != nil {
 		return nil, err
 	}
+	if err := copySubsetDraftRecords(tx); err != nil {
+		return nil, err
+	}
 
 	if _, err := tx.Exec(`
 		INSERT INTO reactions SELECT * FROM src.reactions
@@ -3006,9 +3009,9 @@ func subsetPendingDeliveryAddresses(tx *sql.Tx) ([]subsetIdentityKey, error) {
 	return out, rows.Err()
 }
 
-// markSubsetDraftsAuthored records draft authorship on included messages
-// before draft records are left behind. A message the source has not yet
-// derived could otherwise count as received mail in the subset.
+// markSubsetDraftsAuthored records draft authorship on included messages.
+// A message the source has not yet derived could otherwise count as received
+// mail in the subset.
 func markSubsetDraftsAuthored(tx *sql.Tx) error {
 	if _, err := tx.Exec(`UPDATE messages SET draft_authored = TRUE
 		WHERE draft_authored = FALSE AND id IN (
@@ -3016,6 +3019,40 @@ func markSubsetDraftsAuthored(tx *sql.Tx) error {
 			WHERE m.id IN (SELECT id FROM selected_messages)
 			  AND ` + draftEvidenceInSchemaSQL("src.", "m", "s") + `)`); err != nil {
 		return fmt.Errorf("record subset draft authorship: %w", err)
+	}
+	return nil
+}
+
+// copySubsetDraftRecords keeps draft evidence through later syncs. Each
+// referenced message gets a discarded record with no pending server operation.
+func copySubsetDraftRecords(tx *sql.Tx) error {
+	for _, draft := range []struct {
+		table, columns, values string
+	}{
+		{"imap_drafts", "current_mailbox, current_uidvalidity, current_uid", `
+			CASE WHEN m.id = d.current_message_id THEN d.current_mailbox ELSE d.pending_original_mailbox END,
+			CASE WHEN m.id = d.current_message_id THEN d.current_uidvalidity ELSE d.pending_original_uidvalidity END,
+			CASE WHEN m.id = d.current_message_id THEN d.current_uid ELSE d.pending_original_uid END`},
+		{"gmail_drafts", "gmail_draft_id, current_gmail_message_id, thread_id", `
+			d.gmail_draft_id || ':' || m.id,
+			CASE WHEN m.id = d.current_message_id THEN d.current_gmail_message_id ELSE d.pending_original_gmail_message_id END,
+			d.thread_id`},
+	} {
+		present, err := sourceTableExists(tx, draft.table)
+		if err != nil {
+			return fmt.Errorf("check %s: %w", draft.table, err)
+		}
+		if !present {
+			continue
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`INSERT INTO %s
+			(draft_id, source_id, current_message_id, revision, discarded_at, %s)
+			SELECT d.draft_id || ':' || m.id, d.source_id, m.id, d.revision, CURRENT_TIMESTAMP, %s
+			FROM src.%s d JOIN selected_messages m
+			  ON m.id = d.current_message_id OR m.id = d.pending_original_message_id`,
+			draft.table, draft.columns, draft.values, draft.table)); err != nil {
+			return fmt.Errorf("copy subset %s: %w", draft.table, err)
+		}
 	}
 	return nil
 }
