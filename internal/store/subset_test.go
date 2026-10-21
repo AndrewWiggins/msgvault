@@ -5426,16 +5426,20 @@ func TestCopySubsetKeepsPendingDraftOutOfReceived(t *testing.T) {
 func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 	for _, draft := range []struct {
 		name     string
+		provider string
+		record   bool
 		flag     bool
 		pending  bool
 		selected int
 	}{
-		{name: "flag", flag: true, selected: 1},
-		{name: "imap_record", selected: 1},
-		{name: "imap_record_flag", flag: true, selected: 1},
-		{name: "imap_record_pending_both", pending: true, selected: 2},
-		{name: "imap_record_pending_original", pending: true, selected: 1},
-		{name: "gmail_record", selected: 1},
+		{name: "flag", provider: "imap", flag: true, selected: 1},
+		{name: "imap_record", provider: "imap", record: true, selected: 1},
+		{name: "imap_record_flag", provider: "imap", record: true, flag: true, selected: 1},
+		{name: "imap_record_pending_both", provider: "imap", record: true, pending: true, selected: 2},
+		{name: "imap_record_pending_original", provider: "imap", record: true, pending: true, selected: 1},
+		{name: "gmail_record", provider: "gmail", record: true, selected: 1},
+		{name: "gmail_record_pending_both", provider: "gmail", record: true, pending: true, selected: 2},
+		{name: "gmail_record_pending_original", provider: "gmail", record: true, pending: true, selected: 1},
 	} {
 		for _, sentEvidence := range []string{"none", "label", "origin"} {
 			t.Run(draft.name+"/"+sentEvidence, func(t *testing.T) {
@@ -5448,10 +5452,7 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 				srcDB := createTestSourceDB(t, t.TempDir(), messageCount)
 				src, err := Open(srcDB)
 				require.NoError(err)
-				provider := "imap"
-				if draft.name == "gmail_record" {
-					provider = "gmail"
-				}
+				provider := draft.provider
 				_, err = src.DB().Exec(`UPDATE sources SET source_type = ?`, provider)
 				require.NoError(err)
 				_, err = src.DB().Exec(`UPDATE messages SET sent_at = '2024-02-01' WHERE id = 1`)
@@ -5469,9 +5470,15 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 				if provider == "gmail" {
 					_, err = src.DB().Exec(`INSERT INTO gmail_drafts
 					(draft_id, source_id, gmail_draft_id, current_message_id, current_gmail_message_id, thread_id, revision)
-					VALUES ('draft', 1, 'provider-draft', 1, 'msg_1', 'thread', 2)`)
+					VALUES ('draft', 1, 'provider-draft', ?, ?, 'thread', 2)`, messageCount, fmt.Sprintf("msg_%d", messageCount))
 					require.NoError(err)
-				} else if draft.name != "flag" {
+					if draft.pending {
+						_, err = src.DB().Exec(`UPDATE gmail_drafts SET pending_operation = 'edit',
+						pending_original_message_id = 1, pending_original_gmail_message_id = 'msg_1',
+						pending_raw = X'01', pending_replacement_gmail_message_id = 'msg_2', pending_code = 'cleanup'`)
+						require.NoError(err)
+					}
+				} else if draft.record {
 					_, err = src.DB().Exec(`INSERT INTO imap_drafts
 					(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision)
 					VALUES ('draft', 1, ?, 'Scratch', 7, ?, 2)`, messageCount, messageCount)
@@ -5526,7 +5533,7 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 				require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
 				assert.Equal(originalIsSent, isSent)
 
-				if draft.name != "flag" {
+				if draft.record {
 					table := provider + "_drafts"
 					var discarded, pending int
 					require.NoError(dst.DB().QueryRow(`SELECT COUNT(discarded_at), COUNT(pending_operation) FROM `+table).Scan(&discarded, &pending))
@@ -5564,6 +5571,47 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 				assert.Equal(originalIsSent, isSent)
 			})
 		}
+	}
+}
+
+func TestCopySubsetPreservesMergedSourceDraft(t *testing.T) {
+	for _, provider := range []string{"imap", "gmail"} {
+		t.Run(provider, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			srcDB := createTestSourceDB(t, t.TempDir(), 1)
+			src, err := Open(srcDB)
+			require.NoError(err)
+			t.Cleanup(func() { _ = src.Close() })
+			_, err = src.DB().Exec(`UPDATE sources SET source_type = ?`, provider)
+			require.NoError(err)
+			if provider == "imap" {
+				_, err = src.DB().Exec(`INSERT INTO imap_drafts
+				(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision, discarded_at)
+				VALUES ('draft', 1, 1, 'Scratch', 7, 1, 2, CURRENT_TIMESTAMP)`)
+			} else {
+				_, err = src.DB().Exec(`INSERT INTO gmail_drafts
+				(draft_id, source_id, gmail_draft_id, current_message_id, current_gmail_message_id, thread_id, revision, discarded_at)
+				VALUES ('draft', 1, 'provider-draft', 1, 'msg_1', 'thread', 2, CURRENT_TIMESTAMP)`)
+			}
+			require.NoError(err)
+			into, err := src.GetOrCreateSource(provider, "destination@example.test")
+			require.NoError(err)
+			_, err = src.MergeSourcesContext(t.Context(), MergeSourcesRequest{FromSourceID: 1, IntoSourceID: into.ID})
+			require.NoError(err)
+
+			dstDir := filepath.Join(t.TempDir(), "dst")
+			_, err = CopySubset(srcDB, dstDir, 1, false)
+			require.NoError(err)
+			dst, err := Open(filepath.Join(dstDir, "msgvault.db"))
+			require.NoError(err)
+			t.Cleanup(func() { _ = dst.Close() })
+			candidates, err := dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
+			require.NoError(err)
+			require.Len(candidates, 1)
+			assert.True(candidates[0].Unsent)
+			assert.False(candidates[0].Eligible)
+		})
 	}
 }
 
