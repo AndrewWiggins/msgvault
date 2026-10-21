@@ -5424,149 +5424,156 @@ func TestCopySubsetKeepsPendingDraftOutOfReceived(t *testing.T) {
 }
 
 func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
+	const imapMemberships = `INSERT INTO imap_message_memberships
+		(source_id, mailbox, uidvalidity, uid, message_id, flags)
+		SELECT 1, 'Scratch', 7, id, id, '[]' FROM messages`
+	const imapRecord = `INSERT INTO imap_drafts
+		(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision)
+		VALUES ('draft', 1, 1, 'Scratch', 7, 1, 2)`
+	const imapPendingRecord = `INSERT INTO imap_drafts
+		(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision,
+		pending_operation, pending_original_message_id, pending_original_mailbox, pending_original_uidvalidity,
+		pending_original_uid, pending_raw, pending_replacement_mailbox, pending_replacement_uidvalidity,
+		pending_replacement_uid, pending_code)
+		VALUES ('draft', 1, 2, 'Scratch', 7, 2, 2, 'edit', 1, 'Scratch', 7, 1, X'01', 'Scratch', 7, 2, 'cleanup')`
+	const gmailRecord = `INSERT INTO gmail_drafts
+		(draft_id, source_id, gmail_draft_id, current_message_id, current_gmail_message_id, thread_id, revision)
+		VALUES ('draft', 1, 'provider-draft', 1, 'msg_1', 'thread', 2)`
+	memberships := []IMAPMembershipObservation{{UID: 1, SourceMessageID: "msg_1", Flags: []string{`\Seen`}}}
 	for _, draft := range []struct {
 		name         string
 		provider     string
-		record       bool
-		flag         bool
-		pending      bool
+		messageCount int
 		selected     int
-		sentEvidence string
+		setup        []string
+		sentEvidence func(*Store) error
+		table        string
+		memberships  []IMAPMembershipObservation
+		wantUnsent   bool
 	}{
-		{name: "flag", provider: "imap", flag: true, selected: 1},
-		{name: "imap_record", provider: "imap", record: true, selected: 1, sentEvidence: "origin"},
-		{name: "imap_record_pending_both", provider: "imap", record: true, pending: true, selected: 2},
-		{name: "imap_record_pending_original", provider: "imap", record: true, pending: true, selected: 1},
-		{name: "gmail_record", provider: "gmail", record: true, selected: 1, sentEvidence: "label"},
-	} {
-		sentModes := []string{"none"}
-		if draft.sentEvidence != "" {
-			sentModes = append(sentModes, draft.sentEvidence)
-		}
-		for _, sentEvidence := range sentModes {
-			t.Run(draft.name+"/"+sentEvidence, func(t *testing.T) {
-				require := require.New(t)
-				assert := assert.New(t)
-				messageCount := 1
-				if draft.pending {
-					messageCount = 2
-				}
-				srcDB := createTestSourceDB(t, t.TempDir(), messageCount)
-				src, err := Open(srcDB)
-				require.NoError(err)
-				provider := draft.provider
-				_, err = src.DB().Exec(`UPDATE sources SET source_type = ?`, provider)
-				require.NoError(err)
-				_, err = src.DB().Exec(`UPDATE messages SET sent_at = '2024-02-01' WHERE id = 1`)
-				require.NoError(err)
-				flags := `[]`
-				if draft.flag {
-					flags = `["\\Draft"]`
-				}
-				if provider == "imap" {
-					_, err = src.DB().Exec(`INSERT INTO imap_message_memberships
+		{
+			name: "flag/none", provider: "imap", messageCount: 1, selected: 1, wantUnsent: true,
+			setup: []string{`INSERT INTO imap_message_memberships
 				(source_id, mailbox, uidvalidity, uid, message_id, flags)
-				SELECT 1, 'Scratch', 7, id, id, ? FROM messages`, flags)
-					require.NoError(err)
+				VALUES (1, 'Scratch', 7, 1, 1, '["\\Draft"]')`},
+		},
+		{
+			name: "imap_record/none", provider: "imap", messageCount: 1, selected: 1, wantUnsent: true,
+			setup: []string{imapMemberships, imapRecord}, table: "imap_drafts", memberships: memberships,
+		},
+		{
+			name: "imap_record/origin", provider: "imap", messageCount: 1, selected: 1,
+			setup: []string{imapMemberships, imapRecord}, table: "imap_drafts",
+			sentEvidence: func(src *Store) error {
+				return src.SetMessageMetadata(1, sql.NullString{String: `{"imap_content_origin":"sent"}`, Valid: true})
+			},
+		},
+		{
+			name: "imap_record_pending_both/none", provider: "imap", messageCount: 2, selected: 2, wantUnsent: true,
+			setup: []string{imapMemberships, imapPendingRecord}, table: "imap_drafts",
+			memberships: []IMAPMembershipObservation{
+				{UID: 1, SourceMessageID: "msg_1", Flags: []string{`\Seen`}},
+				{UID: 2, SourceMessageID: "msg_2", Flags: []string{`\Seen`}},
+			},
+		},
+		{
+			name: "imap_record_pending_original/none", provider: "imap", messageCount: 2, selected: 1, wantUnsent: true,
+			setup: []string{imapMemberships, imapPendingRecord}, table: "imap_drafts", memberships: memberships,
+		},
+		{
+			name: "gmail_record/none", provider: "gmail", messageCount: 1, selected: 1, wantUnsent: true,
+			setup: []string{gmailRecord}, table: "gmail_drafts",
+		},
+		{
+			name: "gmail_record/label", provider: "gmail", messageCount: 1, selected: 1,
+			setup: []string{gmailRecord}, table: "gmail_drafts",
+			sentEvidence: func(src *Store) error {
+				labels, err := src.EnsureLabelsBatch(1, map[string]LabelInfo{
+					"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
+				})
+				if err != nil {
+					return err
 				}
-				if provider == "gmail" {
-					_, err = src.DB().Exec(`INSERT INTO gmail_drafts
-					(draft_id, source_id, gmail_draft_id, current_message_id, current_gmail_message_id, thread_id, revision)
-					VALUES ('draft', 1, 'provider-draft', ?, ?, 'thread', 2)`, messageCount, fmt.Sprintf("msg_%d", messageCount))
-					require.NoError(err)
-				} else if draft.record {
-					_, err = src.DB().Exec(`INSERT INTO imap_drafts
-					(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision)
-					VALUES ('draft', 1, ?, 'Scratch', 7, ?, 2)`, messageCount, messageCount)
-					require.NoError(err)
-					if draft.pending {
-						_, err = src.DB().Exec(`UPDATE imap_drafts SET pending_operation = 'edit',
-						pending_original_message_id = 1, pending_original_mailbox = 'Scratch',
-						pending_original_uidvalidity = 7, pending_original_uid = 1, pending_raw = X'01',
-						pending_replacement_mailbox = 'Scratch', pending_replacement_uidvalidity = 7,
-						pending_replacement_uid = 2, pending_code = 'cleanup'`)
-						require.NoError(err)
-					}
-				}
-				before, err := src.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
+				return src.AddMessageLabels(1, []int64{labels["sent"]})
+			},
+		},
+	} {
+		t.Run(draft.name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			srcDB := createTestSourceDB(t, t.TempDir(), draft.messageCount)
+			src, err := Open(srcDB)
+			require.NoError(err)
+			_, err = src.DB().Exec(`UPDATE sources SET source_type = ?`, draft.provider)
+			require.NoError(err)
+			_, err = src.DB().Exec(`UPDATE messages SET sent_at = '2024-02-01' WHERE id = 1`)
+			require.NoError(err)
+			for _, stmt := range draft.setup {
+				_, err = src.DB().Exec(stmt)
 				require.NoError(err)
-				require.Len(before, 1)
-				require.True(before[0].Unsent)
-				if sentEvidence == "label" {
-					labels, err := src.EnsureLabelsBatch(1, map[string]LabelInfo{
-						"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
-					})
-					require.NoError(err)
-					for id := 1; id <= messageCount; id++ {
-						require.NoError(src.AddMessageLabels(int64(id), []int64{labels["sent"]}))
-					}
-				}
-				if sentEvidence == "origin" {
-					for id := 1; id <= messageCount; id++ {
-						require.NoError(src.SetMessageMetadata(int64(id), sql.NullString{String: `{"imap_content_origin":"sent"}`, Valid: true}))
-					}
-				}
-				var originalIsSent sql.NullBool
-				require.NoError(src.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&originalIsSent))
-				require.NoError(src.Close())
+			}
+			before, err := src.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
+			require.NoError(err)
+			require.Len(before, 1)
+			require.True(before[0].Unsent)
+			if draft.sentEvidence != nil {
+				require.NoError(draft.sentEvidence(src))
+			}
+			var originalIsSent sql.NullBool
+			require.NoError(src.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&originalIsSent))
+			require.NoError(src.Close())
 
-				dstDir := filepath.Join(t.TempDir(), "dst")
-				_, err = CopySubset(srcDB, dstDir, draft.selected, false)
-				require.NoError(err)
-				dst, err := Open(filepath.Join(dstDir, "msgvault.db"))
-				require.NoError(err)
-				t.Cleanup(func() { _ = dst.Close() })
-				after, err := dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1, 2})
+			dstDir := filepath.Join(t.TempDir(), "dst")
+			_, err = CopySubset(srcDB, dstDir, draft.selected, false)
+			require.NoError(err)
+			dst, err := Open(filepath.Join(dstDir, "msgvault.db"))
+			require.NoError(err)
+			t.Cleanup(func() { _ = dst.Close() })
+			after, err := dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1, 2})
+			require.NoError(err)
+			require.Len(after, draft.selected)
+			for _, candidate := range after {
+				assert.Equal(draft.wantUnsent, candidate.Unsent)
+				assert.Equal(!draft.wantUnsent, candidate.Eligible)
+			}
+			var isSent sql.NullBool
+			require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
+			assert.Equal(originalIsSent, isSent)
+
+			if draft.table != "" {
+				var discarded, pending int
+				require.NoError(dst.DB().QueryRow(`SELECT COUNT(discarded_at), COUNT(pending_operation) FROM `+draft.table).Scan(&discarded, &pending))
+				assert.Equal(draft.selected, discarded)
+				assert.Zero(pending)
+			}
+			if len(draft.memberships) > 0 {
+				require.NoError(dst.ApplyIMAPMailboxDeltas(1, []IMAPMailboxDelta{{
+					Mailbox: "Scratch", State: IMAPFolderState{UIDValidity: 7}, Memberships: draft.memberships,
+				}}))
+				after, err = dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1, 2})
 				require.NoError(err)
 				require.Len(after, draft.selected)
 				for _, candidate := range after {
-					assert.Equal(sentEvidence == "none", candidate.Unsent)
-					assert.Equal(sentEvidence != "none", candidate.Eligible)
+					assert.True(candidate.Unsent)
+					assert.False(candidate.Eligible)
 				}
-				var isSent sql.NullBool
+			}
+
+			if draft.wantUnsent {
+				labels, err := dst.EnsureLabelsBatch(1, map[string]LabelInfo{
+					"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
+				})
+				require.NoError(err)
+				require.NoError(dst.AddMessageLabels(1, []int64{labels["sent"]}))
+				after, err = dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
+				require.NoError(err)
+				require.Len(after, 1)
+				assert.False(after[0].Unsent)
+				assert.True(after[0].Eligible, "Sent evidence makes the former draft contact activity")
 				require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
 				assert.Equal(originalIsSent, isSent)
-
-				if draft.record {
-					table := provider + "_drafts"
-					var discarded, pending int
-					require.NoError(dst.DB().QueryRow(`SELECT COUNT(discarded_at), COUNT(pending_operation) FROM `+table).Scan(&discarded, &pending))
-					assert.Equal(draft.selected, discarded)
-					assert.Zero(pending)
-					if provider == "imap" && sentEvidence == "none" {
-						memberships := []IMAPMembershipObservation{{UID: 1, SourceMessageID: "msg_1", Flags: []string{`\Seen`}}}
-						if draft.selected == 2 {
-							memberships = append(memberships, IMAPMembershipObservation{UID: 2, SourceMessageID: "msg_2", Flags: []string{`\Seen`}})
-						}
-						require.NoError(dst.ApplyIMAPMailboxDeltas(1, []IMAPMailboxDelta{{
-							Mailbox: "Scratch", State: IMAPFolderState{UIDValidity: 7}, Memberships: memberships,
-						}}))
-						after, err = dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1, 2})
-						require.NoError(err)
-						require.Len(after, draft.selected)
-						for _, candidate := range after {
-							assert.True(candidate.Unsent)
-							assert.False(candidate.Eligible)
-						}
-					}
-				}
-
-				if sentEvidence == "none" {
-					labels, err := dst.EnsureLabelsBatch(1, map[string]LabelInfo{
-						"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
-					})
-					require.NoError(err)
-					require.NoError(dst.AddMessageLabels(1, []int64{labels["sent"]}))
-					after, err = dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
-					require.NoError(err)
-					require.Len(after, 1)
-					assert.False(after[0].Unsent)
-					assert.True(after[0].Eligible, "Sent evidence makes the former draft contact activity")
-					require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
-					assert.Equal(originalIsSent, isSent)
-				}
-			})
-		}
+			}
+		})
 	}
 }
 

@@ -3009,9 +3009,7 @@ func subsetPendingDeliveryAddresses(tx *sql.Tx) ([]subsetIdentityKey, error) {
 	return out, rows.Err()
 }
 
-// markSubsetDraftsAuthored records draft authorship on included messages.
-// A message the source has not yet derived could otherwise count as received
-// mail in the subset.
+// markSubsetDraftsAuthored sets draft_authored, which attribution reads and the activity unsent check does not.
 func markSubsetDraftsAuthored(tx *sql.Tx) error {
 	if _, err := tx.Exec(`UPDATE messages SET draft_authored = TRUE
 		WHERE draft_authored = FALSE AND id IN (
