@@ -473,52 +473,39 @@ func TestPreprocessConfig_FingerprintChangesPerToggle(t *testing.T) {
 	}
 }
 
-func TestConfig_GenerationFingerprint_CanonicalEndpoint(t *testing.T) {
+func TestEmbeddingsConfig_EndpointFingerprint(t *testing.T) {
 	cfg := Config{Embeddings: EmbeddingsConfig{
 		Model: "nomic-embed-text", Dimension: 768, Endpoint: "https://host/v1",
 	}}
 	cfg.ApplyDefaults()
-	baseline := "nomic-embed-text:768:p1-111111:c32768:e1:uac9155fdf06567ceee29a98db867db2edc2fa762db23011b047faf504e08c1f5"
-	assert.Equal(t, baseline, cfg.GenerationFingerprint())
+	const baseline = "ac9155fdf06567ceee29a98db867db2edc2fa762db23011b047faf504e08c1f5"
+	assert.Equal(t, "nomic-embed-text:768:p1-111111:c32768:e1:u"+baseline, cfg.GenerationFingerprint())
 	for _, tc := range []struct {
-		name     string
-		endpoint string
-		equal    bool
+		name      string
+		endpoint  string
+		apiFormat EmbeddingAPIFormat
+		want      string
+		equal     bool
 	}{
-		{"case and trailing slash", "HTTPS://HOST/v1/", true},
-		{"default port", "https://host:443/v1", true},
-		{"embeddings suffix", "https://host/v1/embeddings", true},
-		{"different path", "https://host/v2", false},
-		{"changed host", "https://other.example/v1", false},
-		{"non-default port", "https://host:8443/v1", false},
+		{"case and trailing slash", "HTTPS://HOST/v1/", APIFormatOpenAI, baseline, true},
+		{"default port", "https://host:443/v1", APIFormatOpenAI, baseline, true},
+		{"embeddings suffix", "https://host/v1/embeddings", APIFormatOpenAI, baseline, true},
+		{"different path", "https://host/v2", APIFormatOpenAI, baseline, false},
+		{"changed host", "https://other.example/v1", APIFormatOpenAI, baseline, false},
+		{"non-default port", "https://host:8443/v1", APIFormatOpenAI, baseline, false},
+		{"invalid endpoint fallback", "https://example.com/v1/../embeddings", APIFormatOpenAI, "c4c05946a2cb21b03d4828cec7b442db86dfb56f6fd583e22bf9c5d64ad2eefa", true},
+		{"Voyage preserves embeddings suffix", "https://host/v1/embeddings", APIFormatVoyageContextual, baseline, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := assert.New(t)
-			cfg := cfg
-			cfg.Embeddings.Endpoint = tc.endpoint
+			cfg := EmbeddingsConfig{Endpoint: tc.endpoint, APIFormat: tc.apiFormat}
 			if tc.equal {
-				assert.Equal(baseline, cfg.GenerationFingerprint())
+				assert.Equal(tc.want, cfg.EndpointFingerprint())
 			} else {
-				assert.NotEqual(baseline, cfg.GenerationFingerprint())
+				assert.NotEqual(tc.want, cfg.EndpointFingerprint())
 			}
 		})
 	}
-}
-
-func TestEmbeddingsConfig_EndpointFingerprint_InvalidEndpoint(t *testing.T) {
-	cfg := EmbeddingsConfig{Endpoint: "https://example.com/v1/../embeddings"}
-	assert.Equal(t, "c4c05946a2cb21b03d4828cec7b442db86dfb56f6fd583e22bf9c5d64ad2eefa", cfg.EndpointFingerprint())
-}
-
-func TestConfig_GenerationFingerprint_VoyageEndpointPath(t *testing.T) {
-	assert := assert.New(t)
-	cfg := Config{Embeddings: EmbeddingsConfig{
-		APIFormat: APIFormatVoyageContextual, Model: "voyage-context-4", Dimension: 1024, Endpoint: "https://host/v1",
-	}}
-	cfg.ApplyDefaults()
-	baseline := cfg.GenerationFingerprint()
-	cfg.Embeddings.Endpoint = "https://host/v1/embeddings"
-	assert.NotEqual(baseline, cfg.GenerationFingerprint())
 }
 
 // TestConfig_GenerationFingerprintFolds checks the full identifier

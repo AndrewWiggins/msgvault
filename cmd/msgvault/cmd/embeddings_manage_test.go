@@ -429,17 +429,17 @@ func TestEmbeddingsActivate_AdoptsLegacyEndpoint(t *testing.T) {
 			_, err = mainStore.DB().Exec(`UPDATE messages SET embed_gen = ? WHERE id = 1`, gen)
 			require.NoError(t, err)
 			require.NoError(t, b.Close())
-			oldYes, oldForce := embeddingsActivateYes, embeddingsActivateForce
-			embeddingsActivateYes, embeddingsActivateForce = true, false
-			t.Cleanup(func() { embeddingsActivateYes, embeddingsActivateForce = oldYes, oldForce })
-			previousContext := embeddingsActivateCmd.Context()
-			embeddingsActivateCmd.SetContext(ctx)
-			t.Cleanup(func() { embeddingsActivateCmd.SetContext(previousContext) })
 			if mode == "plan" {
 				response, err := planCLIEmbeddingsActivate(ctx, gen, false)
 				require.NoError(t, err)
 				assert.Contains(t, response.Prompt, c.Vector.GenerationFingerprint())
 			} else {
+				oldYes, oldForce := embeddingsActivateYes, embeddingsActivateForce
+				embeddingsActivateYes, embeddingsActivateForce = true, false
+				t.Cleanup(func() { embeddingsActivateYes, embeddingsActivateForce = oldYes, oldForce })
+				previousContext := embeddingsActivateCmd.Context()
+				embeddingsActivateCmd.SetContext(ctx)
+				t.Cleanup(func() { embeddingsActivateCmd.SetContext(previousContext) })
 				require.NoError(t, runEmbeddingsActivate(embeddingsActivateCmd, []string{strconv.FormatInt(int64(gen), 10)}))
 				assertManualGenerationState(t, gen, vector.GenerationActive)
 			}
