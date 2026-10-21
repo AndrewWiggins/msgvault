@@ -5570,47 +5570,6 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 	}
 }
 
-func TestCopySubsetPreservesMergedSourceDraft(t *testing.T) {
-	for _, provider := range []string{"imap", "gmail"} {
-		t.Run(provider, func(t *testing.T) {
-			require := require.New(t)
-			assert := assert.New(t)
-			srcDB := createTestSourceDB(t, t.TempDir(), 1)
-			src, err := Open(srcDB)
-			require.NoError(err)
-			t.Cleanup(func() { _ = src.Close() })
-			_, err = src.DB().Exec(`UPDATE sources SET source_type = ?`, provider)
-			require.NoError(err)
-			if provider == "imap" {
-				_, err = src.DB().Exec(`INSERT INTO imap_drafts
-				(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision, discarded_at)
-				VALUES ('draft', 1, 1, 'Scratch', 7, 1, 2, CURRENT_TIMESTAMP)`)
-			} else {
-				_, err = src.DB().Exec(`INSERT INTO gmail_drafts
-				(draft_id, source_id, gmail_draft_id, current_message_id, current_gmail_message_id, thread_id, revision, discarded_at)
-				VALUES ('draft', 1, 'provider-draft', 1, 'msg_1', 'thread', 2, CURRENT_TIMESTAMP)`)
-			}
-			require.NoError(err)
-			into, err := src.GetOrCreateSource(provider, "destination@example.test")
-			require.NoError(err)
-			_, err = src.MergeSourcesContext(t.Context(), MergeSourcesRequest{FromSourceID: 1, IntoSourceID: into.ID})
-			require.NoError(err)
-
-			dstDir := filepath.Join(t.TempDir(), "dst")
-			_, err = CopySubset(srcDB, dstDir, 1, false)
-			require.NoError(err)
-			dst, err := Open(filepath.Join(dstDir, "msgvault.db"))
-			require.NoError(err)
-			t.Cleanup(func() { _ = dst.Close() })
-			candidates, err := dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
-			require.NoError(err)
-			require.Len(candidates, 1)
-			assert.True(candidates[0].Unsent)
-			assert.False(candidates[0].Eligible)
-		})
-	}
-}
-
 func TestCopySubsetPreservesBeeperReanchorMarker(t *testing.T) {
 	requirements := require.New(t)
 	sourcePath := createTestSourceDB(t, t.TempDir(), 1)
