@@ -1217,41 +1217,57 @@ func TestKitMigrationReusesExistingGenerationForIndexAndSearch(t *testing.T) {
 	assert.Equal(int32(1), requests.Load(), "only the query is embedded")
 }
 
-func TestSetupVectorFeatures_PreservesLegacyEndpointFingerprintWhenTextDisabled(t *testing.T) {
+func TestSetupVectorFeatures_AdoptsLegacyEndpointOnlyWhenTextEnabled(t *testing.T) {
 	const legacy = "text-embedding-test:4:p1-111111:c32768:e1"
-	dir := t.TempDir()
-	mainPath := filepath.Join(dir, "msgvault.db")
-	c := config.NewDefaultConfig()
-	c.HomeDir = dir
-	c.Data.DataDir = dir
-	c.Vector.Enabled = false
-	c.Vector.Multimodal.Enabled = true
-	c.Vector.DBPath = filepath.Join(dir, "vectors.db")
-	c.Vector.Embeddings = vector.EmbeddingsConfig{
-		Model: "text-embedding-test", Dimension: 4, Endpoint: "https://example.invalid/v1",
-	}
-	testCtx := withTestConfig(t, c)
-	s, err := store.Open(mainPath)
-	require.NoError(t, err)
-	t.Cleanup(func() { assert.NoError(t, s.Close()) })
-	require.NoError(t, s.InitSchema())
-	b, err := sqlitevec.Open(testCtx, sqlitevec.Options{Path: c.Vector.DBPath, Dimension: 4})
-	require.NoError(t, err)
-	generation, err := b.CreateGeneration(testCtx, "text-embedding-test", 4, legacy)
-	require.NoError(t, err)
-	require.NoError(t, b.ActivateGeneration(testCtx, generation, true))
-	require.NoError(t, b.Close())
+	for _, tc := range []struct {
+		name        string
+		textEnabled bool
+	}{
+		{"text disabled", false},
+		// Control: the same setup must reach the writable backend, so the
+		// disabled case cannot pass merely because setup failed earlier.
+		{"text enabled", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mainPath := filepath.Join(dir, "msgvault.db")
+			c := config.NewDefaultConfig()
+			c.HomeDir = dir
+			c.Data.DataDir = dir
+			c.Vector.Enabled = tc.textEnabled
+			c.Vector.Multimodal.Enabled = true
+			c.Vector.DBPath = filepath.Join(dir, "vectors.db")
+			c.Vector.Embeddings.Model = "text-embedding-test"
+			c.Vector.Embeddings.Dimension = 4
+			c.Vector.Embeddings.Endpoint = "https://example.invalid/v1"
+			testCtx := withTestConfig(t, c)
+			s, err := store.Open(mainPath)
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, s.Close()) })
+			require.NoError(t, s.InitSchema())
+			b, err := sqlitevec.Open(testCtx, sqlitevec.Options{Path: c.Vector.DBPath, Dimension: 4})
+			require.NoError(t, err)
+			generation, err := b.CreateGeneration(testCtx, "text-embedding-test", 4, legacy)
+			require.NoError(t, err)
+			require.NoError(t, b.ActivateGeneration(testCtx, generation, true))
+			require.NoError(t, b.Close())
 
-	// Multimodal initialization reaches the writable backend before requiring
-	// an attachment store. Text endpoint adoption must remain disabled.
-	_, err = setupVectorFeatures(testCtx, s, mainPath, false)
-	require.EqualError(t, err, "configure multimodal runtime: attachment content store is unavailable")
-	b, err = sqlitevec.Open(testCtx, sqlitevec.Options{Path: c.Vector.DBPath, MetadataReadOnly: true})
-	require.NoError(t, err)
-	t.Cleanup(func() { assert.NoError(t, b.Close()) })
-	active, err := b.ActiveGeneration(testCtx)
-	require.NoError(t, err)
-	assert.Equal(t, legacy, active.Fingerprint)
+			// Without an attachment store, setup fails after opening the
+			// writable backend.
+			_, err = setupVectorFeatures(testCtx, s, mainPath, false)
+			require.EqualError(t, err, "configure multimodal runtime: attachment content store is unavailable")
+			b, err = sqlitevec.Open(testCtx, sqlitevec.Options{Path: c.Vector.DBPath, MetadataReadOnly: true})
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, b.Close()) })
+			active, err := b.ActiveGeneration(testCtx)
+			require.NoError(t, err)
+			want := legacy
+			if tc.textEnabled {
+				want += ":u" + c.Vector.Embeddings.EndpointFingerprint()
+			}
+			assert.Equal(t, want, active.Fingerprint)
+		})
+	}
 }
 
 func TestRunEmbed_AdoptsLegacyEndpointBeforeGenerationSelection(t *testing.T) {
