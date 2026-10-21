@@ -75,16 +75,23 @@ func TestHandleFastSearchPageOnly(t *testing.T) {
 	assert.NotContains(body, "stats")
 }
 
-func TestHandleFastSearchPageOnlyRejectsView(t *testing.T) {
-	engine := &querytest.MockEngine{
-		SearchFastWithStatsFunc: func(_ context.Context, _ *search.Query, _ string,
-			_ query.MessageFilter, _ query.ViewType, _, _ int) (*query.SearchFastResult, error) {
-			assert.Fail(t, "rejected request must not reach the engine")
-			return &query.SearchFastResult{}, nil
-		},
+func TestHandleFastSearchPageOnlyRejectsCountRequests(t *testing.T) {
+	for _, tc := range []struct{ name, params string }{
+		{"view type", "view_type=senders"},
+		{"count only", "limit=0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := &querytest.MockEngine{
+				SearchFastWithStatsFunc: func(_ context.Context, _ *search.Query, _ string,
+					_ query.MessageFilter, _ query.ViewType, _, _ int) (*query.SearchFastResult, error) {
+					assert.Fail(t, "rejected request must not reach the engine")
+					return &query.SearchFastResult{}, nil
+				},
+			}
+			response := doGet(newTestServerWithEngine(t, engine), "/api/v1/search/fast?q=needle&page_only=true&"+tc.params)
+			assert.Equal(t, http.StatusBadRequest, response.Code)
+		})
 	}
-	response := doGet(newTestServerWithEngine(t, engine), "/api/v1/search/fast?q=needle&page_only=true&view_type=senders")
-	assert.Equal(t, http.StatusBadRequest, response.Code)
 }
 
 func TestHandleDeepSearchPageOnly(t *testing.T) {

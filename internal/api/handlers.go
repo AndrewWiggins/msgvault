@@ -3833,6 +3833,10 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 	} else if limit > maxPageSize {
 		limit = maxPageSize
 	}
+	if filter.Pagination.PageOnly && limit == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_parameter", "page_only cannot be combined with limit=0")
+		return
+	}
 
 	indexState := agentIndexState(r)
 	result, err := engine.SearchFastWithStats(r.Context(), q, queryStr, filter, statsGroupBy, limit, offset)

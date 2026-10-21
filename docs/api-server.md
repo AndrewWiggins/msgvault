@@ -1894,8 +1894,10 @@ without fetching a page. Aggregate `stats` are omitted by default. Supply
 `view_type=senders` (or another aggregate view) to request them. The TUI
 requests these stats for its current view; MCP metadata search skips them.
 Set `page_only=true` on fast search or `GET /api/v1/search/deep`, including
-with `scope=body`, to omit the count and stats, returning `total_count: -1`;
-combining it with `view_type` on fast search returns 400.
+with `scope=body`, to omit the count and stats, returning `total_count: -1`.
+Fast search has no `has_more` field, so a page-only client stops at the first
+page shorter than `limit`. Combining `page_only` with `view_type` or `limit=0`
+on fast search returns 400.
 
 Disconnecting an HTTP MCP client cancels its in-flight daemon search,
 including older MCP protocol clients. Request completion and in-progress logs
