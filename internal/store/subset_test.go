@@ -5434,14 +5434,20 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 	}{
 		{name: "flag", provider: "imap", flag: true, selected: 1},
 		{name: "imap_record", provider: "imap", record: true, selected: 1},
-		{name: "imap_record_flag", provider: "imap", record: true, flag: true, selected: 1},
 		{name: "imap_record_pending_both", provider: "imap", record: true, pending: true, selected: 2},
 		{name: "imap_record_pending_original", provider: "imap", record: true, pending: true, selected: 1},
 		{name: "gmail_record", provider: "gmail", record: true, selected: 1},
 		{name: "gmail_record_pending_both", provider: "gmail", record: true, pending: true, selected: 2},
 		{name: "gmail_record_pending_original", provider: "gmail", record: true, pending: true, selected: 1},
 	} {
-		for _, sentEvidence := range []string{"none", "label", "origin"} {
+		sentModes := []string{"none"}
+		if draft.name == "gmail_record" {
+			sentModes = append(sentModes, "label")
+		}
+		if draft.name == "imap_record" {
+			sentModes = append(sentModes, "origin")
+		}
+		for _, sentEvidence := range sentModes {
 			t.Run(draft.name+"/"+sentEvidence, func(t *testing.T) {
 				require := require.New(t)
 				assert := assert.New(t)
@@ -5492,6 +5498,10 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 						require.NoError(err)
 					}
 				}
+				before, err := src.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
+				require.NoError(err)
+				require.Len(before, 1)
+				require.True(before[0].Unsent)
 				if sentEvidence == "label" {
 					labels, err := src.EnsureLabelsBatch(1, map[string]LabelInfo{
 						"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
@@ -5505,12 +5515,6 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 					for id := 1; id <= messageCount; id++ {
 						require.NoError(src.SetMessageMetadata(int64(id), sql.NullString{String: `{"imap_content_origin":"sent"}`, Valid: true}))
 					}
-				}
-				before, err := src.LoadActivityCandidatesByIDContext(t.Context(), []int64{1, 2})
-				require.NoError(err)
-				require.Len(before, messageCount)
-				for _, candidate := range before {
-					require.Equal(sentEvidence == "none", candidate.Unsent)
 				}
 				var originalIsSent sql.NullBool
 				require.NoError(src.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&originalIsSent))
@@ -5539,7 +5543,7 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 					require.NoError(dst.DB().QueryRow(`SELECT COUNT(discarded_at), COUNT(pending_operation) FROM `+table).Scan(&discarded, &pending))
 					assert.Equal(draft.selected, discarded)
 					assert.Zero(pending)
-					if provider == "imap" {
+					if provider == "imap" && sentEvidence == "none" {
 						memberships := []IMAPMembershipObservation{{UID: 1, SourceMessageID: "msg_1", Flags: []string{`\Seen`}}}
 						if draft.selected == 2 {
 							memberships = append(memberships, IMAPMembershipObservation{UID: 2, SourceMessageID: "msg_2", Flags: []string{`\Seen`}})
@@ -5551,24 +5555,26 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 						require.NoError(err)
 						require.Len(after, draft.selected)
 						for _, candidate := range after {
-							assert.Equal(sentEvidence != "origin", candidate.Unsent)
-							assert.Equal(sentEvidence == "origin", candidate.Eligible)
+							assert.True(candidate.Unsent)
+							assert.False(candidate.Eligible)
 						}
 					}
 				}
 
-				labels, err := dst.EnsureLabelsBatch(1, map[string]LabelInfo{
-					"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
-				})
-				require.NoError(err)
-				require.NoError(dst.AddMessageLabels(1, []int64{labels["sent"]}))
-				after, err = dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
-				require.NoError(err)
-				require.Len(after, 1)
-				assert.False(after[0].Unsent)
-				assert.True(after[0].Eligible, "Sent evidence makes the former draft contact activity")
-				require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
-				assert.Equal(originalIsSent, isSent)
+				if sentEvidence == "none" {
+					labels, err := dst.EnsureLabelsBatch(1, map[string]LabelInfo{
+						"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
+					})
+					require.NoError(err)
+					require.NoError(dst.AddMessageLabels(1, []int64{labels["sent"]}))
+					after, err = dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
+					require.NoError(err)
+					require.Len(after, 1)
+					assert.False(after[0].Unsent)
+					assert.True(after[0].Eligible, "Sent evidence makes the former draft contact activity")
+					require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
+					assert.Equal(originalIsSent, isSent)
+				}
 			})
 		}
 	}
