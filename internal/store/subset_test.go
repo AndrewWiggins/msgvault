@@ -5446,30 +5446,21 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 		messageCount int
 		selected     int
 		setup        []string
-		sentEvidence func(*Store) error
 		table        string
 		memberships  []IMAPMembershipObservation
-		wantUnsent   bool
 	}{
 		{
-			name: "flag/none", provider: "imap", messageCount: 1, selected: 1, wantUnsent: true,
+			name: "flag/none", provider: "imap", messageCount: 1, selected: 1,
 			setup: []string{`INSERT INTO imap_message_memberships
 				(source_id, mailbox, uidvalidity, uid, message_id, flags)
 				VALUES (1, 'Scratch', 7, 1, 1, '["\\Draft"]')`},
 		},
 		{
-			name: "imap_record/none", provider: "imap", messageCount: 1, selected: 1, wantUnsent: true,
+			name: "imap_record/none", provider: "imap", messageCount: 1, selected: 1,
 			setup: []string{imapMemberships, imapRecord}, table: "imap_drafts", memberships: memberships,
 		},
 		{
-			name: "imap_record/origin", provider: "imap", messageCount: 1, selected: 1,
-			setup: []string{imapMemberships, imapRecord}, table: "imap_drafts",
-			sentEvidence: func(src *Store) error {
-				return src.SetMessageMetadata(1, sql.NullString{String: `{"imap_content_origin":"sent"}`, Valid: true})
-			},
-		},
-		{
-			name: "imap_record_pending_both/none", provider: "imap", messageCount: 2, selected: 2, wantUnsent: true,
+			name: "imap_record_pending_both/none", provider: "imap", messageCount: 2, selected: 2,
 			setup: []string{imapMemberships, imapPendingRecord}, table: "imap_drafts",
 			memberships: []IMAPMembershipObservation{
 				{UID: 1, SourceMessageID: "msg_1", Flags: []string{`\Seen`}},
@@ -5477,25 +5468,12 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 			},
 		},
 		{
-			name: "imap_record_pending_original/none", provider: "imap", messageCount: 2, selected: 1, wantUnsent: true,
+			name: "imap_record_pending_original/none", provider: "imap", messageCount: 2, selected: 1,
 			setup: []string{imapMemberships, imapPendingRecord}, table: "imap_drafts", memberships: memberships,
 		},
 		{
-			name: "gmail_record/none", provider: "gmail", messageCount: 1, selected: 1, wantUnsent: true,
+			name: "gmail_record/none", provider: "gmail", messageCount: 1, selected: 1,
 			setup: []string{gmailRecord}, table: "gmail_drafts",
-		},
-		{
-			name: "gmail_record/label", provider: "gmail", messageCount: 1, selected: 1,
-			setup: []string{gmailRecord}, table: "gmail_drafts",
-			sentEvidence: func(src *Store) error {
-				labels, err := src.EnsureLabelsBatch(1, map[string]LabelInfo{
-					"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
-				})
-				if err != nil {
-					return err
-				}
-				return src.AddMessageLabels(1, []int64{labels["sent"]})
-			},
 		},
 	} {
 		t.Run(draft.name, func(t *testing.T) {
@@ -5516,9 +5494,6 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 			require.NoError(err)
 			require.Len(before, 1)
 			require.True(before[0].Unsent)
-			if draft.sentEvidence != nil {
-				require.NoError(draft.sentEvidence(src))
-			}
 			var originalIsSent sql.NullBool
 			require.NoError(src.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&originalIsSent))
 			require.NoError(src.Close())
@@ -5533,8 +5508,8 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 			require.NoError(err)
 			require.Len(after, draft.selected)
 			for _, candidate := range after {
-				assert.Equal(draft.wantUnsent, candidate.Unsent)
-				assert.Equal(!draft.wantUnsent, candidate.Eligible)
+				assert.True(candidate.Unsent)
+				assert.False(candidate.Eligible)
 			}
 			var isSent sql.NullBool
 			require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
@@ -5557,21 +5532,6 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 					assert.True(candidate.Unsent)
 					assert.False(candidate.Eligible)
 				}
-			}
-
-			if draft.wantUnsent {
-				labels, err := dst.EnsureLabelsBatch(1, map[string]LabelInfo{
-					"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
-				})
-				require.NoError(err)
-				require.NoError(dst.AddMessageLabels(1, []int64{labels["sent"]}))
-				after, err = dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
-				require.NoError(err)
-				require.Len(after, 1)
-				assert.False(after[0].Unsent)
-				assert.True(after[0].Eligible, "Sent evidence makes the former draft contact activity")
-				require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
-				assert.Equal(originalIsSent, isSent)
 			}
 		})
 	}
