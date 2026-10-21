@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -821,7 +822,6 @@ func TestSearchCoverageResolvesGenerationStateAndRefreshesStale(t *testing.T) {
 
 func TestSearchCoverageStaleRestartAdvice(t *testing.T) {
 	t.Parallel()
-	assert := assert.New(t)
 	cfg := vector.Config{Enabled: true}
 	backend := &filteredCoverageBackend{active: vector.Generation{ID: 1, Fingerprint: cfg.GenerationFingerprint()}}
 	srv := NewServerWithOptions(ServerOptions{
@@ -833,8 +833,27 @@ func TestSearchCoverageStaleRestartAdvice(t *testing.T) {
 	})
 	backend.active = vector.Generation{ID: 2, Fingerprint: "model-b"}
 	body := getSearchCoverage(t, srv, `{}`)
-	assert.Equal(SearchCoverageStale, body.Status)
-	assert.Equal("model-b", body.VectorFingerprint)
-	assert.Contains(body.Detail, "msgvault daemon restart")
-	assert.NotContains(body.Actions, SearchCoverageActionBuildIndex)
+	{
+		assert := assert.New(t)
+		assert.Equal(SearchCoverageStale, body.Status)
+		assert.Equal("model-b", body.VectorFingerprint)
+		assert.Contains(body.Detail, "msgvault daemon restart")
+		assert.NotContains(body.Actions, SearchCoverageActionBuildIndex)
+	}
+
+	t.Run("timeout", func(t *testing.T) {
+		backend := &filteredCoverageBackend{active: vector.Generation{ID: 2, Fingerprint: "model-b"}}
+		srv := NewServerWithOptions(ServerOptions{
+			Config: &config.Config{Vector: cfg}, Store: &mockStore{stats: &StoreStats{}},
+			Engine: newExploreDuckDBFixture(t), Backend: backend, VectorCfg: cfg, Logger: testLogger(),
+		})
+		srv.SetVectorRestartFingerprint(func(ctx context.Context) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		})
+		synctest.Test(t, func(t *testing.T) {
+			body := getSearchCoverage(t, srv, `{}`)
+			assert.Equal(t, []SearchCoverageAction{SearchCoverageActionRetry}, body.Actions)
+		})
+	})
 }

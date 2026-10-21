@@ -1141,24 +1141,28 @@ message_types = ["email"]
 	resolve := restartVectorFingerprint(st, &invocation{cfg: cfg})
 	initial, err := resolve(t.Context())
 	must.NoError(err)
+	cancelledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
 	for _, test := range []struct {
 		name, accounts, model string
+		ctx                   context.Context
 		same                  bool
 		wantErr               error
 	}{
-		{name: "reordered accounts", accounts: `["b@example.com", "a@example.com"]`, model: "model-a", same: true},
-		{name: "model", accounts: `["a@example.com", "b@example.com"]`, model: "model-b"},
-		{name: "disabled", wantErr: vector.ErrNotEnabled},
+		{name: "reordered accounts", accounts: `["b@example.com", "a@example.com"]`, model: "model-a", ctx: t.Context(), same: true},
+		{name: "model", accounts: `["a@example.com", "b@example.com"]`, model: "model-b", ctx: t.Context()},
+		{name: "disabled", ctx: t.Context(), wantErr: vector.ErrNotEnabled},
+		{name: "cancelled context", accounts: `["a@example.com"]`, model: "model-a", ctx: cancelledCtx, wantErr: context.Canceled},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			assert := assert.New(t)
 			require := require.New(t)
-			if test.wantErr != nil {
+			if errors.Is(test.wantErr, vector.ErrNotEnabled) {
 				require.NoError(os.WriteFile(path, []byte("[vector]\nenabled = false\n"), 0600))
 			} else {
 				writeConfig(test.accounts, test.model)
 			}
-			got, err := resolve(t.Context())
+			got, err := resolve(test.ctx)
 			if test.wantErr != nil {
 				require.ErrorIs(err, test.wantErr)
 				assert.Empty(got)
@@ -1167,7 +1171,7 @@ message_types = ["email"]
 			require.NoError(err)
 			startup, err := config.Load(path, home)
 			require.NoError(err)
-			resolved, err := resolvedVectorConfig(st, startup.Vector)
+			resolved, err := resolvedVectorConfig(t.Context(), st, startup.Vector)
 			require.NoError(err)
 			assert.Equal(resolved.GenerationFingerprint(), got)
 			if test.same {

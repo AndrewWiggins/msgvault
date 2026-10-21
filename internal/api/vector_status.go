@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.kenn.io/msgvault/internal/operations"
+	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
 	"go.kenn.io/msgvault/internal/vector/hybrid"
 	"go.kenn.io/msgvault/internal/vector/visual"
@@ -147,6 +148,18 @@ const vectorRestartAdvice = "the embedding settings in config.toml changed after
 
 const vectorRebuildAdvice = "if this is a one-off account-scoped generation, set matching [vector.embed.scope] accounts and restart the daemon; otherwise run `msgvault embeddings build --full-rebuild` to rebuild"
 
+const vectorUncheckedAdvice = "the daemon could not yet check whether a restart or a rebuild fixes this; retry in a moment for the recovery step"
+
+func cachedStaleAdvice(detail string) string {
+	if strings.HasSuffix(detail, vectorRestartAdvice) {
+		return vectorRestartAdvice
+	}
+	if strings.HasSuffix(detail, vectorUncheckedAdvice) {
+		return vectorUncheckedAdvice
+	}
+	return vectorRebuildAdvice
+}
+
 // SetVectorRestartFingerprint installs the daemon's startup config resolver.
 func (s *Server) SetVectorRestartFingerprint(fn func(context.Context) (string, error)) {
 	s.vectorMu.Lock()
@@ -173,10 +186,13 @@ func (s *Server) staleAdvice(ctx context.Context, backend vector.Backend) (strin
 }
 
 // MarkVectorIndexStale records the mismatch and returns its recovery advice.
-// Concurrent callers share the first caller's diagnosis and its advice.
+// Concurrent callers share one diagnosis that runs on the server's lifetime
+// rather than the caller's request.
 func (s *Server) MarkVectorIndexStale(ctx context.Context, mismatch error) string {
 	v, _, _ := s.vectorStaleFlight.Do("stale", func() (any, error) {
-		return s.markVectorIndexStale(ctx, mismatch), nil
+		diagnosisCtx, cancel := context.WithTimeout(s.importContext, vectorStaleDiagnosisTimeout)
+		defer cancel()
+		return s.markVectorIndexStale(store.WithRequestID(diagnosisCtx, store.RequestIDFromContext(ctx)), mismatch), nil
 	})
 	advice, _ := v.(string)
 	return advice
@@ -188,15 +204,18 @@ func (s *Server) markVectorIndexStale(ctx context.Context, mismatch error) strin
 	detail := s.vectorErr
 	if s.vectorStaleLatch || (stale && time.Now().Before(s.vectorFreshNextCheck)) {
 		s.vectorMu.Unlock()
-		if strings.HasSuffix(detail, vectorRestartAdvice) {
-			return vectorRestartAdvice
-		}
-		return vectorRebuildAdvice
+		return cachedStaleAdvice(detail)
 	}
 	s.vectorFreshNextCheck = time.Now().Add(vectorFreshnessCheckInterval)
 	backend := s.backend
 	s.vectorMu.Unlock()
-	advice, _ := s.staleAdvice(ctx, backend)
+	advice, restart := s.staleAdvice(ctx, backend)
+	if !restart && ctx.Err() != nil {
+		advice = vectorUncheckedAdvice
+		s.vectorMu.Lock()
+		s.vectorFreshNextCheck = time.Now().Add(vectorUncheckedRetryDelay)
+		s.vectorMu.Unlock()
+	}
 	s.SetVectorStale(mismatch.Error() + "; " + advice)
 	return advice
 }
@@ -292,6 +311,10 @@ func (s *Server) maybeCheckVectorScopeDrift(ctx context.Context) {
 // check costs one backend generation lookup and runs on health, stats, and
 // search preflight paths, so it fires at most once per interval.
 const vectorFreshnessCheckInterval = time.Minute
+
+const vectorStaleDiagnosisTimeout = 30 * time.Second
+
+const vectorUncheckedRetryDelay = 5 * time.Second
 
 // maybeRefreshVectorFreshness is the ready→stale counterpart of
 // refreshVectorStatusIfStale. A daemon-proxied one-off scoped build (or any
