@@ -1181,17 +1181,10 @@ func TestKitMigrationReusesExistingGenerationForIndexAndSearch(t *testing.T) {
 	c.Vector.Embeddings.APIFormat = vector.APIFormatOpenAI
 	must.NoError(c.Save())
 	ctx := withTestConfig(t, c)
+	seedMainDBWithLiveMessage(t, dir)
 	mainStore, err := store.Open(mainPath)
 	must.NoError(err)
 	t.Cleanup(func() { assert.NoError(mainStore.Close()) })
-	must.NoError(mainStore.InitSchema())
-	_, err = mainStore.DB().Exec(`
-			INSERT INTO sources (id, source_type, identifier) VALUES (1, 'gmail', 'legacy@example.test');
-			INSERT INTO conversations (id, source_id, conversation_type) VALUES (1, 1, 'email_thread');
-			INSERT INTO messages (id, conversation_id, source_id, source_message_id, message_type)
-			VALUES (1, 1, 1, 'legacy-message', 'email');
-		`)
-	must.NoError(err)
 	must.NoError(sqlitevec.RegisterExtension())
 	b, err := sqlitevec.Open(ctx, sqlitevec.Options{Path: c.Vector.DBPath, Dimension: 4})
 	must.NoError(err)

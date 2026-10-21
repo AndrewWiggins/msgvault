@@ -414,15 +414,10 @@ func TestEmbeddingsActivate_AdoptsLegacyEndpoint(t *testing.T) {
 			c.Vector.Embeddings.Model = "test-model"
 			c.Vector.Embeddings.Dimension = 4
 			ctx := withTestConfig(t, c)
+			seedMainDBWithLiveMessage(t, dir)
 			mainStore, err := store.Open(c.DatabaseDSN())
 			require.NoError(t, err)
 			defer func() { require.NoError(t, mainStore.Close()) }()
-			require.NoError(t, mainStore.InitSchema())
-			_, err = mainStore.DB().Exec(`
-INSERT INTO sources (id, source_type, identifier) VALUES (1, 'gmail', 'test@example.com');
-INSERT INTO conversations (id, source_id, source_conversation_id, conversation_type) VALUES (1, 1, 'thread-1', 'email_thread');
-INSERT INTO messages (id, conversation_id, source_id, source_message_id, message_type) VALUES (1, 1, 1, 'message-1', 'email');`)
-			require.NoError(t, err)
 			require.NoError(t, sqlitevec.RegisterExtension())
 			b, err := sqlitevec.Open(ctx, sqlitevec.Options{
 				Path: c.Vector.DBPath, MainPath: c.DatabaseDSN(), Dimension: 4, MainDB: mainStore.DB(),
