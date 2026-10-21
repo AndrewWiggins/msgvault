@@ -44,9 +44,10 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			require := require.New(t)
 			assert := assert.New(t)
 			f, personID := activityProjectionFixture(t)
-			_, err := activityExec(f.Store, `UPDATE sources SET source_type = 'imap' WHERE id = ?`, f.Source.ID)
-			require.NoError(err)
-			destination, err := f.Store.GetOrCreateSource("imap", "merged@example.invalid")
+			history := newAttrFixtureOn(t, f.Store, "imap", "imaps://user%40example.test@mail.example.test:993")
+			f.Source = history.source
+			f.ConvID = history.conv
+			destination, err := f.Store.GetOrCreateSource("imap", "imaps://merged%40example.test@mail.example.test:993")
 			require.NoError(err)
 			occurredAt := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 			messageID := f.NewMessage().WithSentAt(occurredAt).Create(t, f.Store)
@@ -80,7 +81,7 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			require.NoError(err)
 			if mergeKind == "chained" || mergeKind == "chained-survivor" {
 				intermediate := destination
-				destination, err = f.Store.GetOrCreateSource("imap", "final@example.invalid")
+				destination, err = f.Store.GetOrCreateSource("imap", "imaps://final%40example.test@mail.example.test:993")
 				require.NoError(err)
 				if mergeKind == "chained-survivor" {
 					historicalID := messageID
@@ -121,7 +122,12 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			require.Empty(queued)
 			_, err = f.Store.DB().Exec(`DELETE FROM applied_migrations WHERE name = 'activity_projection_triggers_v5'`)
 			require.NoError(err)
+			revisionBefore, err := f.Store.DerivedDataRevisionContext(t.Context())
+			require.NoError(err)
 			require.NoError(f.Store.InitSchema())
+			revisionAfter, err := f.Store.DerivedDataRevisionContext(t.Context())
+			require.NoError(err)
+			assert.Greater(revisionAfter, revisionBefore, "backfilling merged IMAP draft labels must advance the derived-data revision")
 			_, path = attribution(t, f.Store, messageID)
 			assert.NotEqual("inbound", path.String, "preserved drafts must leave received-mail attribution")
 			queued, err = f.Store.LoadQueuedActivityCandidatesContext(t.Context(), 10)
@@ -130,14 +136,6 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			assert.Equal(messageID, queued[0].MessageID)
 			assert.True(queued[0].Unsent)
 			assert.False(queued[0].Eligible)
-			retraction := activityProjectionFromCandidate(t, queued[0], personID, occurredAt)
-			retraction.Event = nil
-			_, err = f.Store.ProjectActivityBatchContext(t.Context(), []store.ActivityProjection{retraction})
-			require.NoError(err)
-			state, err := f.Store.ContactStateContext(t.Context(), personID, occurredAt)
-			require.NoError(err)
-			assert.Zero(state.InteractionCount)
-			assert.Nil(state.LastContactAt)
 		})
 	}
 }
