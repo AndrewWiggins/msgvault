@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil/storetest"
 )
 
 func TestActivityTriggerMigrationRequeuesProjectedUnsentMessages(t *testing.T) {
@@ -39,69 +40,40 @@ func TestActivityTriggerMigrationRequeuesProjectedUnsentMessages(t *testing.T) {
 }
 
 func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
-	for _, mergeKind := range []string{"direct", "chained", "survivor", "chained-survivor"} {
-		t.Run(mergeKind, func(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup []func(*mergedIMAPDraftFixture, *testing.T)
+	}{
+		{name: "direct", setup: []func(*mergedIMAPDraftFixture, *testing.T){
+			(*mergedIMAPDraftFixture).retireOriginalSource,
+		}},
+		{name: "chained", setup: []func(*mergedIMAPDraftFixture, *testing.T){
+			(*mergedIMAPDraftFixture).retireOriginalSource,
+			(*mergedIMAPDraftFixture).chainDestination,
+		}},
+		{name: "survivor", setup: []func(*mergedIMAPDraftFixture, *testing.T){
+			(*mergedIMAPDraftFixture).addSurvivor,
+			(*mergedIMAPDraftFixture).retireOriginalSource,
+		}},
+		{name: "chained-survivor", setup: []func(*mergedIMAPDraftFixture, *testing.T){
+			(*mergedIMAPDraftFixture).addSurvivor,
+			(*mergedIMAPDraftFixture).prepareFinalSurvivor,
+			(*mergedIMAPDraftFixture).retireOriginalSource,
+			(*mergedIMAPDraftFixture).linkFinalSurvivor,
+			(*mergedIMAPDraftFixture).chainDestination,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			require := require.New(t)
 			assert := assert.New(t)
 			f, personID := activityProjectionFixture(t)
-			history := newAttrFixtureOn(t, f.Store, "imap", "imaps://user%40example.test@mail.example.test:993")
-			f.Source = history.source
-			f.ConvID = history.conv
-			destination, err := f.Store.GetOrCreateSource("imap", "imaps://merged%40example.test@mail.example.test:993")
-			require.NoError(err)
 			occurredAt := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
-			messageID := f.NewMessage().WithSentAt(occurredAt).Create(t, f.Store)
-			_, err = activityExec(f.Store, `INSERT INTO imap_message_memberships
-		(source_id, mailbox, uidvalidity, uid, message_id, flags)
-		VALUES (?, 'Scratch', 7, 1, ?, ?)`, f.Source.ID, messageID, `["\\Draft"]`)
-			require.NoError(err)
-			// Older merges moved messages and kept membership rows on the original source.
-			_, err = activityExec(f.Store, `INSERT INTO source_merge_messages
-		(message_id, original_source_id, original_message_id)
-		SELECT id, source_id, source_message_id FROM messages WHERE id = ?`, messageID)
-			require.NoError(err)
-			_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
-			require.NoError(err)
-			if mergeKind == "survivor" || mergeKind == "chained-survivor" {
-				historicalID := messageID
-				messageID = f.NewMessage().WithSentAt(occurredAt).Create(t, f.Store)
-				_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
-				require.NoError(err)
-				_, err = activityExec(f.Store, `UPDATE source_merge_messages SET survivor_message_id = ? WHERE message_id = ?`, messageID, historicalID)
-				require.NoError(err)
-				_, err = activityExec(f.Store, `UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, historicalID)
-				require.NoError(err)
+			draft := newMergedIMAPDraftFixture(t, f, occurredAt)
+			for _, setup := range tc.setup {
+				setup(draft, t)
 			}
-			var finalSurvivorID int64
-			if mergeKind == "chained-survivor" {
-				finalSurvivorID = f.NewMessage().WithSentAt(occurredAt).Create(t, f.Store)
-			}
-			_, err = activityExec(f.Store, `INSERT INTO source_settings(source_id, history_only, merged_into_source_id, retired_at)
-		VALUES (?, TRUE, ?, CURRENT_TIMESTAMP)`, f.Source.ID, destination.ID)
-			require.NoError(err)
-			if mergeKind == "chained" || mergeKind == "chained-survivor" {
-				intermediate := destination
-				destination, err = f.Store.GetOrCreateSource("imap", "imaps://final%40example.test@mail.example.test:993")
-				require.NoError(err)
-				if mergeKind == "chained-survivor" {
-					historicalID := messageID
-					messageID = finalSurvivorID
-					_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
-					require.NoError(err)
-					_, err = activityExec(f.Store, `INSERT INTO source_merge_messages
-			(message_id, original_source_id, original_message_id, survivor_message_id)
-			SELECT id, source_id, source_message_id, ? FROM messages WHERE id = ?`, messageID, historicalID)
-					require.NoError(err)
-					_, err = activityExec(f.Store, `UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, historicalID)
-					require.NoError(err)
-				}
-				_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE source_id = ?`, destination.ID, intermediate.ID)
-				require.NoError(err)
-				_, err = activityExec(f.Store, `INSERT INTO source_settings(source_id, history_only, merged_into_source_id, retired_at)
-			VALUES (?, TRUE, ?, CURRENT_TIMESTAMP)`, intermediate.ID, destination.ID)
-				require.NoError(err)
-			}
-			_, err = f.Store.EnsureLabelsBatch(destination.ID, map[string]store.LabelInfo{
+			destination, messageID := draft.destination, draft.messageID
+			_, err := f.Store.EnsureLabelsBatch(destination.ID, map[string]store.LabelInfo{
 				"Sent": {Name: "Sent", Type: "system", SystemRole: store.LabelSystemRoleSent},
 			})
 			require.NoError(err)
@@ -138,6 +110,88 @@ func TestActivityTriggerMigrationRequeuesMergedIMAPDraft(t *testing.T) {
 			assert.False(queued[0].Eligible)
 		})
 	}
+}
+
+type mergedIMAPDraftFixture struct {
+	f               *storetest.Fixture
+	occurredAt      time.Time
+	destination     *store.Source
+	messageID       int64
+	finalSurvivorID int64
+}
+
+func newMergedIMAPDraftFixture(t *testing.T, f *storetest.Fixture, occurredAt time.Time) *mergedIMAPDraftFixture {
+	t.Helper()
+	history := newAttrFixtureOn(t, f.Store, "imap", "imaps://user%40example.test@mail.example.test:993")
+	f.Source = history.source
+	f.ConvID = history.conv
+	destination, err := f.Store.GetOrCreateSource("imap", "imaps://merged%40example.test@mail.example.test:993")
+	require.NoError(t, err)
+	messageID := f.NewMessage().WithSentAt(occurredAt).Create(t, f.Store)
+	_, err = activityExec(f.Store, `INSERT INTO imap_message_memberships
+		(source_id, mailbox, uidvalidity, uid, message_id, flags)
+		VALUES (?, 'Scratch', 7, 1, ?, ?)`, f.Source.ID, messageID, `["\\Draft"]`)
+	require.NoError(t, err)
+	// Older merges moved messages and kept membership rows on the original source.
+	_, err = activityExec(f.Store, `INSERT INTO source_merge_messages
+		(message_id, original_source_id, original_message_id)
+		SELECT id, source_id, source_message_id FROM messages WHERE id = ?`, messageID)
+	require.NoError(t, err)
+	_, err = activityExec(f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, destination.ID, messageID)
+	require.NoError(t, err)
+	return &mergedIMAPDraftFixture{f: f, occurredAt: occurredAt, destination: destination, messageID: messageID}
+}
+
+func (d *mergedIMAPDraftFixture) addSurvivor(t *testing.T) {
+	t.Helper()
+	survivorID := d.f.NewMessage().WithSentAt(d.occurredAt).Create(t, d.f.Store)
+	_, err := activityExec(d.f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, d.destination.ID, survivorID)
+	require.NoError(t, err, "move survivor to destination")
+	_, err = activityExec(d.f.Store, `UPDATE source_merge_messages SET survivor_message_id = ? WHERE message_id = ?`, survivorID, d.messageID)
+	require.NoError(t, err, "link historical message to survivor")
+	_, err = activityExec(d.f.Store, `UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, d.messageID)
+	require.NoError(t, err, "hide historical message")
+	d.messageID = survivorID
+}
+
+func (d *mergedIMAPDraftFixture) prepareFinalSurvivor(t *testing.T) {
+	t.Helper()
+	d.finalSurvivorID = d.f.NewMessage().WithSentAt(d.occurredAt).Create(t, d.f.Store)
+}
+
+func (d *mergedIMAPDraftFixture) retireOriginalSource(t *testing.T) {
+	t.Helper()
+	_, err := activityExec(d.f.Store, `INSERT INTO source_settings(source_id, history_only, merged_into_source_id, retired_at)
+		VALUES (?, TRUE, ?, CURRENT_TIMESTAMP)`, d.f.Source.ID, d.destination.ID)
+	require.NoError(t, err, "retire original draft source")
+}
+
+func (d *mergedIMAPDraftFixture) linkFinalSurvivor(t *testing.T) {
+	t.Helper()
+	final, err := d.f.Store.GetOrCreateSource("imap", "imaps://final%40example.test@mail.example.test:993")
+	require.NoError(t, err, "create final survivor source")
+	_, err = activityExec(d.f.Store, `UPDATE messages SET source_id = ? WHERE id = ?`, final.ID, d.finalSurvivorID)
+	require.NoError(t, err, "move final survivor to destination")
+	_, err = activityExec(d.f.Store, `INSERT INTO source_merge_messages
+		(message_id, original_source_id, original_message_id, survivor_message_id)
+		SELECT id, source_id, source_message_id, ? FROM messages WHERE id = ?`, d.finalSurvivorID, d.messageID)
+	require.NoError(t, err, "record chained survivor provenance")
+	_, err = activityExec(d.f.Store, `UPDATE messages SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, d.messageID)
+	require.NoError(t, err, "hide intermediate survivor")
+	d.messageID = d.finalSurvivorID
+}
+
+func (d *mergedIMAPDraftFixture) chainDestination(t *testing.T) {
+	t.Helper()
+	intermediate := d.destination
+	final, err := d.f.Store.GetOrCreateSource("imap", "imaps://final%40example.test@mail.example.test:993")
+	require.NoError(t, err, "create final source")
+	_, err = activityExec(d.f.Store, `UPDATE messages SET source_id = ? WHERE source_id = ?`, final.ID, intermediate.ID)
+	require.NoError(t, err, "move intermediate messages to final source")
+	_, err = activityExec(d.f.Store, `INSERT INTO source_settings(source_id, history_only, merged_into_source_id, retired_at)
+		VALUES (?, TRUE, ?, CURRENT_TIMESTAMP)`, intermediate.ID, final.ID)
+	require.NoError(t, err, "retire intermediate source")
+	d.destination = final
 }
 
 // The helper initializes an archive through the combined message and attachment
