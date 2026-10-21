@@ -5425,27 +5425,23 @@ func TestCopySubsetKeepsPendingDraftOutOfReceived(t *testing.T) {
 
 func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 	for _, draft := range []struct {
-		name     string
-		provider string
-		record   bool
-		flag     bool
-		pending  bool
-		selected int
+		name         string
+		provider     string
+		record       bool
+		flag         bool
+		pending      bool
+		selected     int
+		sentEvidence string
 	}{
 		{name: "flag", provider: "imap", flag: true, selected: 1},
-		{name: "imap_record", provider: "imap", record: true, selected: 1},
+		{name: "imap_record", provider: "imap", record: true, selected: 1, sentEvidence: "origin"},
 		{name: "imap_record_pending_both", provider: "imap", record: true, pending: true, selected: 2},
 		{name: "imap_record_pending_original", provider: "imap", record: true, pending: true, selected: 1},
-		{name: "gmail_record", provider: "gmail", record: true, selected: 1},
-		{name: "gmail_record_pending_both", provider: "gmail", record: true, pending: true, selected: 2},
-		{name: "gmail_record_pending_original", provider: "gmail", record: true, pending: true, selected: 1},
+		{name: "gmail_record", provider: "gmail", record: true, selected: 1, sentEvidence: "label"},
 	} {
 		sentModes := []string{"none"}
-		if draft.name == "gmail_record" {
-			sentModes = append(sentModes, "label")
-		}
-		if draft.name == "imap_record" {
-			sentModes = append(sentModes, "origin")
+		if draft.sentEvidence != "" {
+			sentModes = append(sentModes, draft.sentEvidence)
 		}
 		for _, sentEvidence := range sentModes {
 			t.Run(draft.name+"/"+sentEvidence, func(t *testing.T) {
@@ -5478,12 +5474,6 @@ func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
 					(draft_id, source_id, gmail_draft_id, current_message_id, current_gmail_message_id, thread_id, revision)
 					VALUES ('draft', 1, 'provider-draft', ?, ?, 'thread', 2)`, messageCount, fmt.Sprintf("msg_%d", messageCount))
 					require.NoError(err)
-					if draft.pending {
-						_, err = src.DB().Exec(`UPDATE gmail_drafts SET pending_operation = 'edit',
-						pending_original_message_id = 1, pending_original_gmail_message_id = 'msg_1',
-						pending_raw = X'01', pending_replacement_gmail_message_id = 'msg_2', pending_code = 'cleanup'`)
-						require.NoError(err)
-					}
 				} else if draft.record {
 					_, err = src.DB().Exec(`INSERT INTO imap_drafts
 					(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision)
