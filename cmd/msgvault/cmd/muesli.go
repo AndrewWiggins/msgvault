@@ -266,14 +266,14 @@ func runConfiguredMuesliSync(ctx context.Context, st *store.Store, source config
 		source.Identifier, source.Identifier)
 	registered, err := requireRegisteredMeetingSource(st, muesli.SourceType, source.Identifier, notRegistered)
 	if err != nil {
-		return err
+		return recordSyncAttempt(ctx, muesli.SourceType, source.Identifier, err)
 	}
 	if registered.MergedIntoSourceID != 0 {
 		return nil
 	}
 	accountEmail, err := source.EffectiveAccountEmail()
 	if err != nil {
-		return err
+		return recordSyncAttempt(ctx, muesli.SourceType, source.Identifier, err)
 	}
 	options := muesliImportOptions(source)
 	options.AttachmentsDir = attachmentsDir
@@ -289,6 +289,7 @@ func runConfiguredMuesliSync(ctx context.Context, st *store.Store, source config
 	// Check the cache even when this scan wrote nothing: a hook or manual
 	// import may have been throttled by min_rebuild_interval, and the
 	// background refresher schedules the retry that import did not.
+	_ = recordSyncAttempt(ctx, muesli.SourceType, source.Identifier, importErr)
 	return run.finishScheduled(ctx, "muesli:"+source.Identifier,
 		rebuildMuesliCacheAfterScheduledSync)
 }
