@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	stdsync "sync"
 	"syscall"
 	"time"
 
@@ -868,6 +869,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	cacheJobs.logger = logger
 	storeAdapter := &storeAPIAdapter{
 		store:                  s,
+		operationGate:          operationGate,
 		config:                 cfg,
 		options:                state.options,
 		logger:                 logger,
@@ -1752,6 +1754,8 @@ func newDaemonIdleTracker(c *config.Config, stop context.CancelFunc, logger *slo
 // Since api.APIMessage, api.StoreStats, etc. are type aliases for store types,
 // the adapter methods are simple pass-throughs with no conversion needed.
 type storeAPIAdapter struct {
+	operationGate             api.OperationGate
+	embeddingsOptimizeMu      stdsync.Mutex
 	store                     *store.Store
 	config                    *config.Config
 	options                   invocationOptions
@@ -2517,6 +2521,9 @@ func (a *storeAPIAdapter) runCLICommandWithRunner(
 	emit func(api.CLIRunEvent) error,
 	run cliCommandSubprocessRunner,
 ) (runErr error) {
+	if api.IsCLIRunEmbeddingsOptimize(req.Args) {
+		return a.runCLIEmbeddingsOptimize(ctx, req, emit)
+	}
 	if manualSyncCLICommand(req.Args) {
 		defer func() {
 			force, skip := manualSyncCacheFlagValues(req.Args)
