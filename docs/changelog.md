@@ -140,7 +140,7 @@ All notable changes to msgvault, grouped by release.
   guest notifications default to `none`. The daemon verifies calendar access
   and archives successful changes immediately.
 - [Twilio calls](usage/meetings.md#twilio) archive as searchable meetings with
-  their recordings saved locally.
+  their recordings saved locally, up to 1 GiB each by default (`max_media_mb`).
 - [Kata issues](usage/kata-issues.md) can quote an exact passage from a
   message, transcript, or file, from the Web UI, `msgvault kata`, HTTP, or MCP
   (`--allow-kata-writes`). Retrying a create returns the original issue, and
