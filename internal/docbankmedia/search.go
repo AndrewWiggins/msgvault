@@ -166,7 +166,7 @@ func (c *Client) Search(ctx context.Context, request SearchRequest) (SearchRepor
 				return SearchReport{}, ErrInvalidReceipt
 			}
 		}
-		hit.Excerpt = strings.ReplaceAll(strings.ReplaceAll(hit.Excerpt, "\x01", ""), "\x02", "")
+		hit.Excerpt = plainExcerpt(hit.Excerpt)
 	}
 	return report, nil
 }
@@ -183,6 +183,11 @@ func (c *Client) searchReport(ctx context.Context, request SearchRequest) (Searc
 		return SearchReport{}, ErrInvalidReceipt
 	}
 	return report, nil
+}
+
+// plainExcerpt removes the match markers Docbank puts around each hit.
+func plainExcerpt(excerpt string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(excerpt, "\x01", ""), "\x02", "")
 }
 
 func validSearchHit(hit SearchHit, vault string, ids map[string]bool) bool {
@@ -233,6 +238,7 @@ func (c *Client) SearchDocuments(ctx context.Context, request SearchRequest) (Se
 		if !content {
 			continue
 		}
+		hit.Excerpt = plainExcerpt(hit.Excerpt)
 		results = append(results, hit)
 	}
 	report.Results = results
