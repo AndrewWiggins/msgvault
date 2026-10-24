@@ -755,7 +755,7 @@ func (s *syntheticMistralTransport) RoundTrip(request *http.Request) (*http.Resp
 		pages[i] = map[string]any{"index": i, "markdown": fmt.Sprintf("%s slide %d", s.sentinel, i)}
 	}
 	body, err := json.Marshal(map[string]any{
-		"model": "mistral-ocr-4-0", "pages": pages,
+		"model": mistral.DefaultModel, "pages": pages,
 		"usage_info": map[string]any{"pages_processed": s.processed, "doc_size_bytes": s.sourceLen},
 	})
 	if err != nil {

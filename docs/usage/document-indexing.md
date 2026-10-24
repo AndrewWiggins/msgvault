@@ -62,7 +62,9 @@ Three independent gates must pass before production extraction:
    posture, processing limits, normalization policy, and capability evidence.
 
 A changed policy or manifest produces a different profile identity and requires
-new consent. OCR credentials are read only for the explicit probe and extraction
+new consent. When upgrading from an older Mistral model, set `model` to
+`mistral-ocr-4-1`, rerun the capability probe, and record consent again.
+OCR credentials are read only for the explicit probe and extraction
 commands. Local fixture validation, status, keyword search, retirement, and
 purging make no OCR request. Semantic and hybrid search have separate consent
 to send queries to the embedding provider.
@@ -104,7 +106,7 @@ enabled = true
 provider = "mistral"
 region = "eu"
 api_key_env = "MISTRAL_API_KEY"
-model = "mistral-ocr-4-0"
+model = "mistral-ocr-4-1"
 retention_posture = "zdr"
 training_posture = "opted-out"
 max_file_bytes = 52428800
