@@ -32,6 +32,14 @@
     onOpen(hit);
   }
 
+  // Mark only the first row for the selected message across both lists.
+  function isCurrent(hit: MediaSearchResult | MediaAttachmentResult, index: number, recording: boolean): boolean {
+    if (!result || selectedMessageID !== hit.message_id) return false;
+    const first = result.results.findIndex(other => other.message_id === hit.message_id);
+    if (recording) return first === index;
+    return first < 0 && result.attachments?.results.findIndex(other => other.message_id === hit.message_id) === index;
+  }
+
   $effect(() => {
     const missingID = missingMessageID;
     const current = untrack(() => result);
@@ -142,7 +150,7 @@
 {#snippet resultRow(hit: MediaSearchResult | MediaAttachmentResult, index: number, recording: MediaSearchResult | undefined)}
   {@const prefix = recording ? id : `${id}-attachment`}
   <li>
-    <a href={`/messages/${hit.message_id}`} aria-current={selectedMessageID === hit.message_id && (recording || !result?.results.some(other => other.message_id === hit.message_id)) ? 'true' : undefined}
+    <a href={`/messages/${hit.message_id}`} aria-current={isCurrent(hit, index, recording !== undefined) ? 'true' : undefined}
       aria-labelledby={`${prefix}-title-${index}`} aria-describedby={`${prefix}-meta-${index} ${prefix}-excerpt-${index}`}
       onclick={(event) => openHit(event, hit)}>
       <span class="recording-icon" aria-hidden="true">{#if recording}<FileVolume size={16} />{:else}<FileText size={16} />{/if}</span>

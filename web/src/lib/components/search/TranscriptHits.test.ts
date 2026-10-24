@@ -288,13 +288,21 @@ describe('TranscriptHits', () => {
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
 
-  it('marks a selected message in only one result list', async () => {
-    const client = createAPIClient(vi.fn<typeof fetch>(async () => Response.json(report({ results: [hit({ message_id: 44 })], attachments: {
-      results: [{ message_id: 44, conversation_id: 22, attachment_id: 55, filename: 'report.pdf', containing_title: 'Report', excerpt: 'quartz' }], truncated: false,
+  it.each([
+    ['a recording and an attachment', [hit({ message_id: 44 })], 'voice.wav'],
+    ['two attachments', [], 'report.pdf'],
+  ])('marks one row when the selected message has %s', async (_, recordings, filename) => {
+    const client = createAPIClient(vi.fn<typeof fetch>(async () => Response.json(report({ results: recordings, attachments: {
+      results: [
+        { message_id: 44, conversation_id: 22, attachment_id: 55, filename: 'report.pdf', containing_title: 'Report', excerpt: 'quartz' },
+        { message_id: 44, conversation_id: 22, attachment_id: 56, filename: 'appendix.pdf', containing_title: 'Report', excerpt: 'quartz' },
+      ], truncated: false,
     } }))));
     render(TranscriptHits, { props: { client, query: 'quartz', supported: true, selectedMessageID: 44 } });
-    await screen.findByRole('link', { name: 'Report' });
-    expect(screen.getAllByRole('link', { current: true })).toHaveLength(1);
+    await screen.findAllByRole('link', { name: 'Report' });
+    const marked = screen.getAllByRole('link', { current: true });
+    expect(marked).toHaveLength(1);
+    expect(marked[0].textContent).toContain(filename);
   });
 
   it('filters a known missing message from both lists when a pending response arrives', async () => {
