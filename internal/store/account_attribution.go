@@ -831,6 +831,8 @@ func (s *Store) refreshAccountAttributionIfOutboundChangedTx(
 }
 
 func (s *Store) requeueActivityProjectionTx(ctx context.Context, tx *loggedTx, messageID int64) error {
+	// The message lock orders this read after a projector write that validated
+	// the old unsent state, so a committed stale event is seen and retracted.
 	if err := s.lockMeetingEvidenceWith(ctx, tx, messageID); err != nil {
 		return fmt.Errorf("lock draft activity for message %d: %w", messageID, err)
 	}
