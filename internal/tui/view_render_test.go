@@ -1050,6 +1050,31 @@ func TestHeaderUpdateNoticeNarrowTerminal(t *testing.T) {
 	assert.LessOrEqual(t, lineWidth, 40, "header line 1 width exceeds narrow terminal width")
 }
 
+// TestHeaderUpdateNoticeNamesUpgradeCommand verifies the notice names the
+// command that upgrades this build: brew for Homebrew, msgvault otherwise.
+func TestHeaderUpdateNoticeNamesUpgradeCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		distribution string
+		want         string
+		notWant      string
+	}{
+		{name: "self-updating build", want: "update: v2.0.0 — msgvault update", notWant: "brew"},
+		{name: "official download", distribution: "kenn", want: "update: v2.0.0 — msgvault update", notWant: "brew"},
+		{name: "homebrew build", distribution: "homebrew", want: "update: v2.0.0 — brew upgrade msgvault", notWant: "msgvault update"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := NewBuilder().WithSize(140, 24).WithDistribution(tc.distribution).Build()
+			updated, _ := model.Update(updateCheckMsg{version: "v2.0.0"})
+
+			title := stripANSI(asModel(t, updated).buildTitleBar())
+
+			assert.Contains(t, title, tc.want)
+			assert.NotContains(t, title, tc.notWant)
+		})
+	}
+}
+
 // TestAnalyticsNoticeShownWhileLoading verifies the info line explains slow
 // first loads when the daemon reported no analytics cache, and disappears
 // once data arrives.

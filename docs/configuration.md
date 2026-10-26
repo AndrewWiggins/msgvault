@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-20"
+last_edited: "2026-10-26"
 title: Configuration
 description: Configuration file reference, environment variables, and file locations.
 ---
@@ -2224,6 +2224,8 @@ that blocks storage, can also each send one. Each event carries only:
   `relationships`, `saved_views`, `sources`, `deletions`, `settings`, `message`,
   `email`, `texts`, or `meetings`. Unknown names are dropped.
 - the msgvault version and commit
+- the distribution channel that built the binary, such as `homebrew` or `kenn`
+  for official downloads; empty for source builds
 - the operating system and CPU architecture
 - a random install ID kept in `telemetry-install.json` in the data directory, and
   the whole hours since it was created
@@ -2249,8 +2251,8 @@ other value turns it on. `TELEMETRY_ENABLED=0` and `DO_NOT_TRACK=1` also turn
 it off, and so does running in CI. Restart the daemon after changing these. The
 CLI and terminal UI honor the same opt-outs in their own environment. A CLI
 command that starts a local daemon passes its environment to it. Only release
-builds send telemetry, and builds made with the `kit_posthog_disabled` tag never
-do.
+builds send telemetry: they set the PostHog project key at link time. Builds
+without that key, including source builds and tests, send nothing.
 
 ## File Locations
 
