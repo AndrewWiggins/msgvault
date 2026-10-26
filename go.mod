@@ -59,7 +59,7 @@ require (
 	golang.org/x/text v0.43.0
 	golang.org/x/time v0.16.0
 	golang.org/x/tools v0.52.0
-	google.golang.org/api v0.304.0
+	google.golang.org/api v0.305.0
 	howett.net/plist v1.0.1
 	maunium.net/go/mautrix v0.32.0
 )
