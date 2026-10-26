@@ -6,6 +6,8 @@ permissions:
 # The | separator falls back to the module's source repo on any proxy error, not just 404/410.
 env:
   GOPROXY: https://proxy.golang.org|direct
+  # Compile without absolute source paths, like the Makefile does.
+  GOFLAGS: -trimpath
 
 on:
   workflow_call:
@@ -500,7 +502,7 @@ jobs:
           CGO_ENABLED: "1"
           CGO_CFLAGS: "-IC:/msys64/mingw64/include -fgnu89-inline"
           CGO_LDFLAGS: "-Wl,--allow-multiple-definition"
-          GOFLAGS: "-buildvcs=false"
+          GOFLAGS: "-buildvcs=false -trimpath"
         run: |
           $version = (Select-String -Path .custom-gcl.yml -Pattern '^version: (\S+)').Matches[0].Groups[1].Value
           go run "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$version" custom --destination "$env:RUNNER_TEMP" --name custom-gcl

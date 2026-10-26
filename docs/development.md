@@ -34,6 +34,29 @@ refuses `msgvault update` and points at `brew upgrade msgvault`. It adds the
 `duckdb_use_lib` tag, which links a system `libduckdb`; set `CGO_LDFLAGS` (and
 `CGO_CFLAGS` for headers) when that library is outside the default search path.
 
+### Share the Go build cache across worktrees
+
+Make targets compile Go with `-trimpath`, so binaries record module-relative
+source paths instead of absolute ones. Without it, Go caches every package
+separately for each checkout directory, and each git worktree grows the build
+cache by another full copy. With it, identical source in any checkout reuses
+the same cache entries.
+
+- Run `make <target> GOFLAGS=-trimpath=false` to opt out for one command.
+- Plain `go` commands outside Make do not add the flag. Run
+  `go env -w GOFLAGS=-trimpath` to make it your default; Make keeps any value
+  saved that way.
+
+Debuggers need a source mapping for trimmed binaries:
+
+- `dlv debug` and `dlv test` inherit `GOFLAGS` and cannot find source files.
+  Pass `--build-flags=-trimpath=false`. Debug builds disable optimizations, so
+  they never shared cache entries anyway.
+- For `dlv exec` or `dlv attach` on a trimmed binary, start Delve from the
+  repository root and run `config substitute-path -guess` (Delve 1.24 or
+  later). It maps the module path to your checkout, the standard library to
+  `GOROOT`, and dependencies to the module cache.
+
 ### Windows
 
 Use the PowerShell helper from the repository root to compile the Go binary.
