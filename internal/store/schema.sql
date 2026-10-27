@@ -2470,6 +2470,9 @@ BEGIN UPDATE operation_history_state SET membership_revision = membership_revisi
 
 CREATE INDEX IF NOT EXISTS idx_sync_run_items_run_status
     ON sync_run_items(sync_run_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_run_items_local_deletion
+    ON sync_run_items(source_message_id, sync_run_id)
+    WHERE phase='fetch' AND status='skipped' AND error_kind='acquisition_local_deletion';
 CREATE INDEX IF NOT EXISTS idx_source_import_items_source_provider
     ON source_import_items(source_id, provider, status);
 
