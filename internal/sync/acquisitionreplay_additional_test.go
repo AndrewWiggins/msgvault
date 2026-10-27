@@ -154,12 +154,106 @@ func TestAcquisitionReplayGeneric404RemainsDebt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), second404.Errors)
 	acquisitionReplayAbsent(t, e, "404-id")
+	// The generic-404 classification must survive a normal database reopen.
+	acquisitionReplayReopen(t, e)
+	require.Len(t, e.Mock.GetMessageCalls, 2, "both 404 attempts occurred before reopen")
 	delete(e.Mock.GetMessageError, "404-id")
 	e.Mock.AddMessage("404-id", testMIME(), nil)
 	third, err := e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
 	require.NoError(t, err)
 	require.Equal(t, int64(1), third.MessagesAdded)
 	acquisitionReplayRaw(t, e, "404-id")
+}
+
+func TestAcquisitionReplayResolvedDebtSurvivesIntentionalLocalDeletion(t *testing.T) {
+	e := acquisitionReplayEnv(t)
+	s := e.CreateSourceWithHistory(t, "1000")
+	acquisitionReplayCreateAndResolveDebt(t, e, s, "local-delete")
+	_, err := e.Store.DB().Exec(e.Store.Rebind(`
+		UPDATE messages SET deleted_at=CURRENT_TIMESTAMP, delete_batch_id='synthetic-batch'
+		WHERE source_id=? AND source_message_id='local-delete'`), s.ID)
+	require.NoError(t, err)
+	deleted, err := e.Store.DeleteDedupedBatch("synthetic-batch")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, deleted)
+	acquisitionReplayReopen(t, e)
+	calls := len(e.Mock.GetMessageCalls)
+	_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
+	require.NoError(t, err)
+	require.Len(t, e.Mock.GetMessageCalls, calls, "resolved debt must stay resolved after intentional local deletion")
+	requireAcquisitionErrorHistory(t, e, "local-delete", 1)
+}
+
+func TestAcquisitionReplayResolvedDebtSurvivesSourceDeletionAndGC(t *testing.T) {
+	e := acquisitionReplayEnv(t)
+	s := e.CreateSourceWithHistory(t, "1000")
+	acquisitionReplayCreateAndResolveDebt(t, e, s, "source-delete")
+	require.NoError(t, e.Store.MarkMessageDeleted(s.ID, "source-delete"))
+	acquisitionReplayReopen(t, e)
+	calls := len(e.Mock.GetMessageCalls)
+	_, err := e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
+	require.NoError(t, err)
+	require.Len(t, e.Mock.GetMessageCalls, calls, "source deletion tombstone resolves the replay")
+	if e.Store.IsPostgreSQL() {
+		return // archive GC is intentionally SQLite-only
+	}
+	plan, err := e.Store.PlanGCContext(e.Context)
+	require.NoError(t, err)
+	deleted, err := e.Store.ExecuteGCContext(e.Context, plan)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), deleted)
+	acquisitionReplayReopen(t, e)
+	calls = len(e.Mock.GetMessageCalls)
+	_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
+	require.NoError(t, err)
+	require.Len(t, e.Mock.GetMessageCalls, calls, "Gmail-deleted message must not be reacquired after GC")
+	requireAcquisitionErrorHistory(t, e, "source-delete", 1)
+}
+
+func TestAcquisitionReplayUnexpectedRawLossRemainsRecoverable(t *testing.T) {
+	e := acquisitionReplayEnv(t)
+	s := e.CreateSourceWithHistory(t, "1000")
+	acquisitionReplayCreateAndResolveDebt(t, e, s, "raw-loss")
+	_, err := e.Store.DB().Exec(e.Store.Rebind(`DELETE FROM message_raw WHERE message_id=(
+		SELECT id FROM messages WHERE source_id=? AND source_message_id='raw-loss')`), s.ID)
+	require.NoError(t, err)
+	acquisitionReplayReopen(t, e)
+	_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
+	require.NoError(t, err)
+	require.Len(t, e.Mock.GetMessageCalls, 3, "unexpected RAW loss must trigger repair")
+	acquisitionReplayRaw(t, e, "raw-loss")
+}
+
+func acquisitionReplayCreateAndResolveDebt(t *testing.T, e *TestEnv, s *store.Source, id string) {
+	t.Helper()
+	e.Mock.AddMessage(id, testMIME(), []string{"INBOX"})
+	e.Mock.MessagePages = [][]string{{id}}
+	e.SetHistory(1001, historyAdded(id))
+	acquisitionReplayTrigger(t, e, "message_raw")
+	first, err := e.Syncer.Incremental(e.Context, s)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), first.Errors)
+	acquisitionReplayDrop(t, e)
+	e.SetHistory(1001)
+	acquisitionReplayReopen(t, e)
+	recovered, err := e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), recovered.MessagesAdded)
+	acquisitionReplayRaw(t, e, id)
+	requireAcquisitionErrorHistory(t, e, id, 1)
+	var resolved int
+	require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind(`
+		SELECT count(*) FROM sync_run_items WHERE source_message_id=? AND error_kind=?`),
+		id, store.AcquisitionReplayResolved).Scan(&resolved))
+	require.Equal(t, 1, resolved, "successful recovery decision is durable")
+}
+
+func requireAcquisitionErrorHistory(t *testing.T, e *TestEnv, id string, want int) {
+	t.Helper()
+	var count int
+	require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind(`
+		SELECT count(*) FROM sync_run_items WHERE source_message_id=? AND status='error'`), id).Scan(&count))
+	require.Equal(t, want, count, "diagnostic history remains append-only")
 }
 
 func TestAcquisitionReplayReplayRepairsMessageWithoutRaw(t *testing.T) {

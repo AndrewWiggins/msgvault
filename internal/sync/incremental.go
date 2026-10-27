@@ -419,6 +419,15 @@ func (s *Syncer) replayFetchFailures(
 	}
 	fetchIDs := make([]string, 0, len(messageIDs))
 	for _, messageID := range messageIDs {
+		if _, ok := existing[messageID]; ok {
+			s.recordSyncItem(syncID, messageID, syncItemPhaseFetch,
+				store.SyncRunItemStatusSkipped, syncItemKindAcquisitionResolved, nil)
+		}
+	}
+	if err := s.requireRecordedSyncItems(syncID); err != nil {
+		return nil, err
+	}
+	for _, messageID := range messageIDs {
 		if _, ok := existing[messageID]; !ok {
 			fetchIDs = append(fetchIDs, messageID)
 		}
@@ -486,6 +495,8 @@ func (s *Syncer) replayFetchFailures(
 			checkpoint.MessagesAdded++
 			summary.BytesDownloaded += int64(len(result.Message.Raw))
 			successfulIDs = append(successfulIDs, messageID)
+			s.recordSyncItem(syncID, messageID, syncItemPhaseFetch,
+				store.SyncRunItemStatusSkipped, syncItemKindAcquisitionResolved, nil)
 		}
 		if err := s.requireRecordedSyncItems(syncID); err != nil {
 			return nil, err

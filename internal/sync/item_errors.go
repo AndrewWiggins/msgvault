@@ -14,12 +14,13 @@ const (
 	syncItemPhaseIngest = "ingest"
 	syncItemPhaseDelete = "delete"
 
-	syncItemKindBatchFetchError = "batch_fetch_error"
-	syncItemKindFetchError      = "fetch_error"
-	syncItemKindGmailNotFound   = "gmail_not_found"
-	syncItemKindMessageGone     = "message_gone"
-	syncItemKindIngestError     = "ingest_error"
-	syncItemKindDeleteError     = "delete_error"
+	syncItemKindBatchFetchError     = "batch_fetch_error"
+	syncItemKindFetchError          = "fetch_error"
+	syncItemKindGmailNotFound       = "gmail_not_found"
+	syncItemKindMessageGone         = "message_gone"
+	syncItemKindIngestError         = "ingest_error"
+	syncItemKindDeleteError         = "delete_error"
+	syncItemKindAcquisitionResolved = store.AcquisitionReplayResolved
 )
 
 var errRawBatchMissing = errors.New("missing raw message in batch result")
