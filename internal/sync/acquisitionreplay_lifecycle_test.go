@@ -338,6 +338,104 @@ func TestAcquisitionReplayLifecycleTransitionMatrix(t *testing.T) {
 	}
 }
 
+func TestAcquisitionReplaySuccessfulHistoryAcquisitionSupersedesSourceDeletion(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		name := "incremental"
+		if full {
+			name = "full"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := acquisitionReplayEnv(t)
+			s := acquisitionReplayDebt(t, e, "native-id")
+			e.SetHistory(1002, historyDeleted("native-id"))
+			_, err := e.Syncer.Incremental(t.Context(), s)
+			require.NoError(t, err)
+			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplaySourceDeleted))
+
+			delete(e.Mock.GetMessageError, "native-id")
+			e.SetHistory(1003, historyAdded("native-id"))
+			if full {
+				e.Mock.MessagePages = [][]string{{"native-id"}}
+				_, err = e.Syncer.Full(t.Context(), testEmail)
+			} else {
+				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
+			}
+			require.NoError(t, err)
+			acquisitionReplayRaw(t, e, "native-id")
+			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayResolved),
+				"successful RAW persistence must supersede an earlier source-deletion disposition")
+
+			_, err = e.Store.DB().Exec(e.Store.Rebind(`DELETE FROM message_raw WHERE message_id=(
+				SELECT id FROM messages WHERE source_id=? AND source_message_id='native-id')`), s.ID)
+			require.NoError(t, err)
+			acquisitionReplayReopen(t, e)
+			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
+			require.NoError(t, err)
+			assert.Contains(t, pending, "native-id", "unexpected RAW loss must reopen the successful acquisition")
+
+			calls := len(e.Mock.GetMessageCalls)
+			e.SetHistory(1003)
+			_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
+			require.NoError(t, err)
+			assert.Len(t, e.Mock.GetMessageCalls, calls+1, "inactive History must still replay missing RAW")
+			acquisitionReplayRaw(t, e, "native-id")
+		})
+	}
+}
+
+func TestAcquisitionReplayResolutionRollsBackWithRAW(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		name := "incremental"
+		if full {
+			name = "full"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := acquisitionReplayEnv(t)
+			s := acquisitionReplayDebt(t, e, "native-id")
+			e.SetHistory(1002, historyDeleted("native-id"))
+			_, err := e.Syncer.Incremental(t.Context(), s)
+			require.NoError(t, err)
+			delete(e.Mock.GetMessageError, "native-id")
+			if full {
+				e.Mock.MessagePages = [][]string{{"native-id"}}
+			} else {
+				e.SetHistory(1003, historyAdded("native-id"))
+			}
+			acquisitionReplayInstallFault(t, e, "resolved_disposition_fault", "sync_run_items", "NEW.error_kind='acquisition_resolved'")
+			if full {
+				_, err = e.Syncer.Full(t.Context(), testEmail)
+			} else {
+				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
+			}
+			require.NoError(t, err, "the failed atomic persist is retained as replay debt")
+			assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayResolved))
+			var messageRows, rawRows int
+			require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind(`SELECT count(*) FROM messages WHERE source_id=? AND source_message_id='native-id'`), s.ID).Scan(&messageRows))
+			require.NoError(t, e.Store.DB().QueryRow(`SELECT count(*) FROM message_raw`).Scan(&rawRows))
+			assert.Zero(t, messageRows, "message row rolls back with failed resolution")
+			assert.Zero(t, rawRows, "RAW rolls back with failed resolution")
+			acquisitionReplayReopen(t, e)
+			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
+			require.NoError(t, err)
+			assert.Contains(t, pending, "native-id")
+			acquisitionReplayDropFault(t, e, "resolved_disposition_fault", []string{"sync_run_items"})
+
+			// The error is now replayable without another History record or full
+			// listing; only a durable RAW plus disposition settles the debt.
+			if full {
+				_, err = e.Syncer.Full(t.Context(), testEmail)
+			} else {
+				e.SetHistory(1003)
+				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
+			}
+			require.NoError(t, err)
+			acquisitionReplayReopen(t, e)
+			acquisitionReplayRaw(t, e, "native-id")
+			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayResolved))
+		})
+	}
+}
+
 func TestAcquisitionReplayInventoryHistoryHandoff(t *testing.T) {
 	for _, outcome := range []string{"acquired", "fetch-error", "journal-error", "history-error"} {
 		t.Run(outcome, func(t *testing.T) {
@@ -381,6 +479,23 @@ func TestAcquisitionReplayInventoryHistoryHandoff(t *testing.T) {
 				assert.Empty(t, pending)
 			}
 			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted))
+			if outcome == "acquired" {
+				assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplayResolved),
+					"History catch-up from H=15000 must durably resolve the inventory disposition")
+				_, err = e.Store.DB().Exec(e.Store.Rebind(`DELETE FROM message_raw WHERE message_id=(
+					SELECT id FROM messages WHERE source_id=? AND source_message_id='lost')`), s.ID)
+				require.NoError(t, err)
+				acquisitionReplayReopen(t, e)
+				pending, err = e.Store.PendingAcquisitionReplayIDs(s.ID)
+				require.NoError(t, err)
+				assert.Contains(t, pending, "lost", "a later missing RAW reopens the H=15000 acquisition")
+				calls := len(e.Mock.GetMessageCalls)
+				e.SetHistory(20000)
+				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
+				require.NoError(t, err)
+				assert.Len(t, e.Mock.GetMessageCalls, calls+1, "inactive History still repairs the missing RAW")
+				acquisitionReplayRaw(t, e, "lost")
+			}
 			delete(e.Mock.GetMessageError, "lost")
 			e.Mock.HistoryError = nil
 			e.SetHistory(20000, historyAdded("lost"))

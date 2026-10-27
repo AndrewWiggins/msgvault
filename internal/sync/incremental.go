@@ -59,7 +59,7 @@ func (s *Syncer) incrementalWithRecovery(
 	}
 
 	// Read acquisition debt across prior runs before starting the new run.
-	pendingReplayIDs, err := s.pendingFetchReplayIDs(source.ID)
+	pendingReplayIDs, terminalReplayIDs, err := s.pendingFetchReplayState(source.ID)
 	if err != nil {
 		return nil, fmt.Errorf("find pending fetch replays: %w", err)
 	}
@@ -90,6 +90,7 @@ func (s *Syncer) incrementalWithRecovery(
 	}
 	scoped := *s
 	scoped.store = s.store.ScopedToSync(source.ID, syncID)
+	scoped.acquisitionTerminalIDs = terminalReplayIDs
 	s = &scoped
 	summary.SyncRunID = syncID
 

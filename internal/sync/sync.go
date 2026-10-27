@@ -101,6 +101,9 @@ type Syncer struct {
 	// relocation targets that failed this run. It is set only on the scoped
 	// Syncer copy a single full() run uses and never persists.
 	failedRelocationGuards *failedRelocationGuards
+	// acquisitionTerminalIDs is the sorted terminal subset of the acquisition
+	// replay snapshot. A later durable RAW can supersede these dispositions.
+	acquisitionTerminalIDs []string
 }
 
 // SuccessfulSyncHook runs after the durable sync run is marked complete.
@@ -1106,7 +1109,6 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 			result.acknowledged = append(result.acknowledged, sourceMessageID)
 			summary.BytesDownloaded += int64(len(raw.Raw))
 		}
-
 		// Newly-persisted messages get embed_gen = NULL by column default,
 		// so the scan-and-fill embed worker picks them up automatically on
 		// its next run — no sync-time enqueue step is needed.
@@ -1399,11 +1401,12 @@ func (s *Syncer) full(
 		s.failStoppedSync(state.syncID, err)
 		return nil, fmt.Errorf("sync labels: %w", err)
 	}
-	pendingReplayIDs, err := s.pendingFetchReplayIDs(source.ID)
+	pendingReplayIDs, terminalReplayIDs, err := s.pendingFetchReplayState(source.ID)
 	if err != nil {
 		s.failStoppedSync(state.syncID, err)
 		return nil, fmt.Errorf("read acquisition replay debt: %w", err)
 	}
+	s.acquisitionTerminalIDs = terminalReplayIDs
 	pendingReplaySet := make(map[string]struct{}, len(pendingReplayIDs))
 	for _, id := range pendingReplayIDs {
 		pendingReplaySet[id] = struct{}{}
@@ -1913,14 +1916,17 @@ func (s *Syncer) persistMessage(data *messageData, labelMap map[string]int64) (i
 	}
 
 	// Persist atomically
+	_, resolveAcquisition := slices.BinarySearch(
+		s.acquisitionTerminalIDs, data.message.SourceMessageID)
 	messageID, err := s.store.PersistMessage(&store.MessagePersistData{
-		Message:    data.message,
-		Metadata:   data.metadata,
-		BodyText:   sql.NullString{String: data.bodyText, Valid: data.bodyText != ""},
-		BodyHTML:   sql.NullString{String: data.bodyHTML, Valid: data.bodyHTML != ""},
-		RawMIME:    data.rawMIME,
-		Recipients: recipientSets,
-		LabelIDs:   labelIDs,
+		Message:            data.message,
+		ResolveAcquisition: resolveAcquisition,
+		Metadata:           data.metadata,
+		BodyText:           sql.NullString{String: data.bodyText, Valid: data.bodyText != ""},
+		BodyHTML:           sql.NullString{String: data.bodyHTML, Valid: data.bodyHTML != ""},
+		RawMIME:            data.rawMIME,
+		Recipients:         recipientSets,
+		LabelIDs:           labelIDs,
 	})
 	if err != nil {
 		return 0, err
