@@ -1091,6 +1091,10 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 			updated, err := s.ingestMessage(
 				ctx, sourceID, raw, threadID, labelMap)
 			if err != nil {
+				if errors.Is(err, store.ErrAcquisitionLocallyDeleted) {
+					result.skipped++
+					continue
+				}
 				if errors.Is(err, errDeferredIMAPIdentity) {
 					if updated {
 						result.updated++
