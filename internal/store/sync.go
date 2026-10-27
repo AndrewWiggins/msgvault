@@ -1040,9 +1040,9 @@ const acquisitionReplayLookupBatchSize = 500
 const acquisitionLocalDeletionIndexDefinition = `ON sync_run_items(source_message_id, sync_run_id)
 	WHERE phase='fetch' AND status='skipped' AND error_kind='acquisition_local_deletion'`
 
-// acquisitionReplayLatestKindsWith folds only requested native IDs. The query
-// visits the source journal once per bounded chunk instead of repeating the
-// same historical lookup for each ID in a deletion batch.
+// acquisitionReplayLatestKindsWith returns the latest journal outcome for the
+// requested native IDs with one grouped query per bounded chunk, rather than
+// issuing a separate history query for each ID.
 func (s *Store) acquisitionReplayLatestKindsWith(
 	ctx context.Context, q *loggedTx, sourceID int64, sourceMessageIDs []string,
 ) (map[string]string, error) {
@@ -1091,9 +1091,9 @@ func (s *Store) acquisitionReplayLatestKindsWith(
 	return latestKinds, nil
 }
 
-// recordAcquisitionReplayDispositionsWith records tracked outcomes for a
-// provider deletion page. Historical state and run ownership are read once per
-// bounded chunk; duplicate IDs in a page still produce at most one event.
+// recordAcquisitionReplayDispositionsWith appends changed deletion outcomes for
+// tracked Gmail IDs. It processes bounded chunks, preserves source/run ownership,
+// and records a duplicate ID at most once.
 func (s *Store) recordAcquisitionReplayDispositionsWith(
 	ctx context.Context, q *loggedTx, sourceID int64, sourceMessageIDs []string,
 	kind, message string,

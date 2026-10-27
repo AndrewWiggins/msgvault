@@ -180,12 +180,13 @@ dispositions. A successful new acquisition writes its resolution in the RAW
 transaction. Failure to append that resolution rolls back the new RAW and leaves
 a durable ingestion failure for replay.
 
-Provider deletion batches and SQLite GC read acquisition history for at most
-500 native IDs per source at a time. They aggregate the latest events in SQL
-and append only changed dispositions in the same transaction as removal. This
-bounds the additional lifecycle lookup memory and avoids a separate history
-scan for each deleted message. GC still validates its existing complete plan
-before removal; PostgreSQL archive GC remains unsupported.
+For tracked Gmail IDs, provider deletion batches and SQLite GC read acquisition
+history for at most 500 native IDs per source at a time. They aggregate the latest
+events in SQL and append only changed dispositions in the same transaction as
+the tombstone or removal. This bounds the additional lifecycle lookup memory
+and avoids a separate history query for each deleted message. GC still validates
+its existing complete plan before removal; PostgreSQL archive GC remains
+unsupported.
 
 Ordinary sync may advance its cursor past a failed acquisition only after the
 diagnostic is durable. Failure to record an outcome prevents checkpoint or final
