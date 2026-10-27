@@ -2128,6 +2128,10 @@ func (s *cacheSourceSnapshot) prepareTables(tables []cacheSnapshotTable) error {
 	}
 	for _, t := range tables {
 		csvPath := filepath.Join(s.tmpDir, t.name+".csv")
+		info, err := os.Stat(csvPath)
+		if err != nil {
+			return fmt.Errorf("stat CSV snapshot %s: %w", t.name, err)
+		}
 		// DuckDB handles both forward and backslash paths, but normalize to forward.
 		escaped := strings.ReplaceAll(csvPath, "\\", "/")
 		escaped = strings.ReplaceAll(escaped, "'", "''")
@@ -2135,6 +2139,12 @@ func (s *cacheSourceSnapshot) prepareTables(tables []cacheSnapshotTable) error {
 		// need it, so the sniffer's 20,480-row sample may see none and settle
 		// on quote=(empty), splitting a later quoted field into extra columns.
 		csvOpts := "header=true, quote='\"', escape='\"', nullstr='\\N'"
+		// A row cannot exceed its snapshot file. Keep DuckDB's default 2 MB
+		// line limit and 16x buffer ratio, but shrink both for small tables:
+		// attribution queries scan these views repeatedly, and a default
+		// 32 MB buffer per scan can exhaust the builder's memory budget.
+		maxLineSize := min(info.Size(), int64(2_000_000))
+		csvOpts += fmt.Sprintf(", max_line_size=%d, buffer_size=%d", maxLineSize, 16*maxLineSize)
 		if t.typeOverrides != "" {
 			csvOpts += ", " + strings.TrimSuffix(t.typeOverrides, "}") + ", '__invalid_utf8': 'VARCHAR'}"
 		}
