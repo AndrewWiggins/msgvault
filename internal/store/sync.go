@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -966,6 +967,51 @@ func (s *Store) RecordSyncRunItemContext(ctx context.Context, item SyncRunItem) 
 		return fmt.Errorf("insert sync_run_item: %w", err)
 	}
 	return nil
+}
+
+// PendingAcquisitionReplayIDs reads unresolved acquisition errors across all
+// source runs, including full, failed and legacy untyped runs. Diagnostics are
+// append-only: only a later explicit gone-message skip acknowledges an error.
+// The caller must additionally check for successfully persisted RAW content.
+func (s *Store) PendingAcquisitionReplayIDs(sourceID int64) ([]string, error) {
+	rows, err := s.db.Query(`
+  SELECT item.source_message_id, item.status, item.phase, item.error_kind
+  FROM sync_run_items item
+  JOIN sync_runs run ON run.id = item.sync_run_id
+  WHERE run.source_id = ? AND item.source_message_id NOT IN ('', '(unknown)')
+    AND ((item.status = 'error' AND
+          ((item.phase = 'fetch' AND item.error_kind IN ('fetch_error', 'batch_fetch_error'))
+            OR (item.phase = 'ingest' AND item.error_kind = 'ingest_error')))
+      OR (item.status = 'skipped' AND item.phase = 'fetch'
+          AND item.error_kind IN ('message_gone', 'gmail_not_found')))
+  ORDER BY item.id`, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("read acquisition debt: %w", err)
+	}
+	defer rows.Close()
+	debt := make(map[string]bool)
+	for rows.Next() {
+		var messageID, status, phase, errorKind string
+		if err := rows.Scan(&messageID, &status, &phase, &errorKind); err != nil {
+			return nil, err
+		}
+		if status == SyncRunItemStatusSkipped && phase == "fetch" && errorKind == "message_gone" {
+			debt[messageID] = false
+		} else {
+			debt[messageID] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(debt))
+	for id, pending := range debt {
+		if pending {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // CountSyncRunItems returns the number of recorded per-item sync outcomes for

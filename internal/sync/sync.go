@@ -88,6 +88,7 @@ func DefaultOptions() *Options {
 
 // Syncer performs Gmail synchronization.
 type Syncer struct {
+	itemRecordError    error // scoped to a single run; checked before publishing progress
 	client             gmail.API
 	store              *store.Store
 	logger             *slog.Logger
@@ -291,6 +292,9 @@ func (s *Syncer) completeSyncWithoutHook(
 	historyID string,
 	publishSourceCursor bool,
 ) error {
+	if err := s.requireRecordedSyncItems(syncID); err != nil {
+		return err
+	}
 	var err error
 	if publishSourceCursor {
 		err = s.store.CompleteSyncAndUpdateSourceCursorContext(
@@ -1440,6 +1444,9 @@ func (s *Syncer) full(
 			return nil, err
 		}
 
+		if err := s.requireRecordedSyncItems(state.syncID); err != nil {
+			return nil, err
+		}
 		discoveryHealth.observe(s.runPageIdentityDiscovery(ctx, source.ID, result.sourceMessageIDs))
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			err := fmt.Errorf("sync canceled during identity discovery: %w", ctxErr)
