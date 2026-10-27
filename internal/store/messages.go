@@ -94,7 +94,10 @@ type MessageDeliveryEvidence struct {
 // MessagePersistData bundles everything needed to atomically
 // persist a message and its related rows in a single transaction.
 type MessagePersistData struct {
-	Message                   *Message
+	Message *Message
+	// ResolveAcquisition records a successful Gmail acquisition in the same
+	// transaction as RawMIME. Intentional local deletion still forbids the write.
+	ResolveAcquisition        bool
 	Conversation              *ConversationPersistData
 	Delivery                  *MessageDeliveryEvidence
 	Metadata                  *sql.NullString
@@ -2366,7 +2369,7 @@ func (s *Store) persistMessageWith(
 	}
 	q := boundQuerier{ctx: ctx, q: tx}
 	message := data.Message
-	if s.syncGeneration != nil {
+	if s.syncGeneration != nil || data.ResolveAcquisition {
 		// Scoped acquisition holds the shared identity lock. A purge holds it
 		// exclusively until both its policy and physical removal commit.
 		deleted, err := acquisitionLocallyDeletedWith(q, message.SourceID, message.SourceMessageID)
@@ -2478,6 +2481,17 @@ func (s *Store) persistMessageWith(
 		fts.MessageID = messageID
 		if err := s.dialect.FTSUpsert(q, fts); err != nil {
 			return 0, fmt.Errorf("upsert fts: %w", err)
+		}
+	}
+	if data.ResolveAcquisition {
+		if len(data.RawMIME) == 0 {
+			return 0, errors.New("resolve acquisition requires persisted RAW MIME")
+		}
+		if err := s.appendAcquisitionReplayDispositionWith(
+			q, message.SourceID, message.SourceMessageID,
+			AcquisitionReplayResolved, "Gmail acquisition RAW persisted",
+		); err != nil {
+			return 0, fmt.Errorf("resolve acquisition with persisted RAW: %w", err)
 		}
 	}
 	return messageID, nil
@@ -3488,8 +3502,8 @@ func (s *Store) MarkMessageDeletedContext(ctx context.Context, sourceID int64, s
 		if err != nil {
 			return err
 		}
-		return s.recordAcquisitionReplayDispositionWith(
-			tx, sourceID, sourceMessageID, AcquisitionReplaySourceDeleted,
+		return s.recordAcquisitionReplayDispositionsWith(
+			ctx, tx, sourceID, []string{sourceMessageID}, AcquisitionReplaySourceDeleted,
 			"Gmail source deletion observed",
 		)
 	})
@@ -3536,15 +3550,10 @@ func (s *Store) MarkMessagesDeletedBatch(sourceID int64, sourceMessageIDs []stri
 			fmt.Sprintf(`UPDATE messages SET deleted_from_source_at = %s WHERE source_id = ? AND source_message_id IN (%%s) AND deleted_from_source_at IS NULL`, s.dialect.Now())); err != nil {
 			return err
 		}
-		for _, sourceMessageID := range sourceMessageIDs {
-			if err := s.recordAcquisitionReplayDispositionWith(
-				tx, sourceID, sourceMessageID, AcquisitionReplaySourceDeleted,
-				"Gmail source deletion observed",
-			); err != nil {
-				return err
-			}
-		}
-		return nil
+		return s.recordAcquisitionReplayDispositionsWith(
+			context.Background(), tx, sourceID, sourceMessageIDs,
+			AcquisitionReplaySourceDeleted, "Gmail source deletion observed",
+		)
 	})
 }
 

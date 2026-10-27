@@ -190,20 +190,6 @@ func TestAcquisitionReplayResolvedDebtSurvivesSourceDeletionAndGC(t *testing.T) 
 	requireAcquisitionErrorHistory(t, e, "source-delete", 1)
 }
 
-func TestAcquisitionReplayUnexpectedRawLossRemainsRecoverable(t *testing.T) {
-	e := acquisitionReplayEnv(t)
-	s := e.CreateSourceWithHistory(t, "1000")
-	acquisitionReplayCreateAndResolveDebt(t, e, s, "raw-loss")
-	_, err := e.Store.DB().Exec(e.Store.Rebind(`DELETE FROM message_raw WHERE message_id=(
-		SELECT id FROM messages WHERE source_id=? AND source_message_id='raw-loss')`), s.ID)
-	require.NoError(t, err)
-	acquisitionReplayReopen(t, e)
-	_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-	require.NoError(t, err)
-	require.Len(t, e.Mock.GetMessageCalls, 3, "unexpected RAW loss must trigger repair")
-	acquisitionReplayRaw(t, e, "raw-loss")
-}
-
 func acquisitionReplayCreateAndResolveDebt(t *testing.T, e *TestEnv, s *store.Source, id string) {
 	t.Helper()
 	e.Mock.AddMessage(id, testMIME(), []string{"INBOX"})

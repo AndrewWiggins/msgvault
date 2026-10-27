@@ -106,10 +106,11 @@ func (s *Syncer) getMessagesRawBatchWithIdentityValidation(
 	return results, nil
 }
 
-// pendingFetchReplayIDs includes ingestion and full-run failures. Neither a
-// newer run nor a bounded full traversal can erase another run's debt.
-func (s *Syncer) pendingFetchReplayIDs(sourceID int64) ([]string, error) {
-	return s.store.PendingAcquisitionReplayIDs(sourceID)
+// pendingFetchReplayState includes ingestion and full-run failures and the
+// remote-deletion dispositions which a later durable acquisition may reopen.
+// Neither a newer run nor a bounded full traversal can erase another run's debt.
+func (s *Syncer) pendingFetchReplayState(sourceID int64) ([]string, []string, error) {
+	return s.store.AcquisitionReplayState(sourceID)
 }
 
 // requireRecordedSyncItems prevents a lost diagnostic from being passed by a

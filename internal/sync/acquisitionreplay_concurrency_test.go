@@ -530,16 +530,20 @@ func (a *acquisitionReplayFetchBarrier) GetMessagesRawBatchWithErrors(ctx contex
 }
 
 func TestAcquisitionReplayDeletionDuringFetch(t *testing.T) {
-	for _, full := range []bool{false, true} {
-		t.Run(fmt.Sprint(full), func(t *testing.T) {
+	for _, tc := range []struct{ full, sourceDeleted bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+		t.Run(fmt.Sprintf("full=%t/source-deleted=%t", tc.full, tc.sourceDeleted), func(t *testing.T) {
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "race-id")
+			if tc.sourceDeleted {
+				require.NoError(t, e.Store.MarkMessagesDeletedBatch(s.ID, []string{"race-id"}))
+				e.SetHistory(1002, historyAdded("race-id"))
+			}
 			delete(e.Mock.GetMessageError, "race-id")
 			api := &acquisitionReplayFetchBarrier{MockAPI: e.Mock, reached: make(chan struct{}), release: make(chan struct{})}
 			e.Syncer = New(api, e.Store, nil)
 			done := make(chan error, 1)
 			go func() {
-				if full {
+				if tc.full {
 					_, err := e.Syncer.Full(t.Context(), testEmail)
 					done <- err
 				} else {

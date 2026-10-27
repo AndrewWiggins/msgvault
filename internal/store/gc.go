@@ -100,6 +100,60 @@ func equalGCPlans(a, b GCPlan) bool {
 		slices.Equal(a.SourceDeletedIDs, b.SourceDeletedIDs)
 }
 
+// recordGCSourceDeletedAcquisitions reuses the GC plan already checked in this
+// transaction. Each bounded lookup visits only that page's primary keys, rather
+// than scanning and sorting the remaining purge population again for each page.
+func (s *Store) recordGCSourceDeletedAcquisitions(ctx context.Context, tx *loggedTx, messageIDs []int64) error {
+	for start := 0; start < len(messageIDs); start += acquisitionReplayLookupBatchSize {
+		end := min(start+acquisitionReplayLookupBatchSize, len(messageIDs))
+		chunk := messageIDs[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		rows, err := tx.QueryContext(ctx, `
+			SELECT messages.source_id, messages.source_message_id
+			FROM messages
+			WHERE messages.id IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return fmt.Errorf("list Gmail acquisition GC candidates: %w", err)
+		}
+		idsBySource := make(map[int64][]string)
+		for rows.Next() {
+			var sourceID int64
+			var nativeID string
+			if err := rows.Scan(&sourceID, &nativeID); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan Gmail acquisition GC candidate: %w", err)
+			}
+			idsBySource[sourceID] = append(idsBySource[sourceID], nativeID)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("iterate Gmail acquisition GC candidates: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close Gmail acquisition GC candidates: %w", err)
+		}
+		sourceIDs := make([]int64, 0, len(idsBySource))
+		for sourceID := range idsBySource {
+			sourceIDs = append(sourceIDs, sourceID)
+		}
+		slices.Sort(sourceIDs)
+		for _, sourceID := range sourceIDs {
+			if err := s.recordAcquisitionReplayDispositionsWith(
+				ctx, tx, sourceID, idsBySource[sourceID],
+				AcquisitionReplaySourceDeleted,
+				"Gmail source deletion retained before local garbage collection",
+			); err != nil {
+				return fmt.Errorf("record Gmail acquisition GC dispositions for source %d: %w", sourceID, err)
+			}
+		}
+	}
+	return nil
+}
+
 // ExecuteGCContext permanently removes source-deleted rows only. The expected
 // plan is rechecked inside the deletion transaction so a confirmation cannot
 // authorize a population that changed while the operator was reading it.
@@ -127,30 +181,7 @@ func (s *Store) ExecuteGCContext(
 				actual,
 			)
 		}
-		if _, err := q.Exec(fmt.Sprintf(`
-			INSERT INTO sync_run_items (
-				sync_run_id, source_message_id, phase, status, error_kind, error_message, created_at
-			)
-			SELECT (
-				SELECT id FROM sync_runs WHERE source_id = messages.source_id ORDER BY id DESC LIMIT 1
-			), messages.source_message_id, 'fetch', 'skipped', ?, ?, %s
-			FROM messages
-			JOIN sources src ON src.id = messages.source_id AND src.source_type = 'gmail'
-			WHERE messages.deleted_from_source_at IS NOT NULL
-			  AND NOT (`+managedDraftRetainedMessageSQL+`)
-			  AND EXISTS (SELECT 1 FROM sync_runs run WHERE run.source_id = messages.source_id)
-			  AND EXISTS (
-				SELECT 1 FROM sync_run_items item
-				JOIN sync_runs prior_run ON prior_run.id = item.sync_run_id
-				WHERE prior_run.source_id = messages.source_id
-				  AND item.source_message_id = messages.source_message_id
-				  AND item.phase IN ('fetch', 'ingest')
-				  AND item.error_kind IN ('fetch_error', 'batch_fetch_error', 'ingest_error',
-				      'gmail_not_found', 'message_gone', 'acquisition_resolved',
-				      'acquisition_local_deletion', 'acquisition_source_deleted')
-			  )
-		`, s.dialect.Now()), AcquisitionReplaySourceDeleted,
-			"Gmail source deletion retained before local garbage collection"); err != nil {
+		if err := s.recordGCSourceDeletedAcquisitions(ctx, tx, actual.SourceDeletedIDs); err != nil {
 			return fmt.Errorf("record Gmail acquisition resolution before GC: %w", err)
 		}
 		affectedConversationIDs, err := commaSeparatedIDs(q, `
