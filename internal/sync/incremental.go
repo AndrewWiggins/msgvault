@@ -44,8 +44,7 @@ func (s *Syncer) incremental(
 		return nil, fmt.Errorf("invalid history ID %q: %w", source.SyncCursor.String, err)
 	}
 
-	// Read the prior run's fetch debt before a new run exists, so a ledger error
-	// cannot fail a run and the completed run stays visible for the next attempt.
+	// Read acquisition debt across prior runs before starting the new run.
 	pendingReplayIDs, err := s.pendingFetchReplayIDs(source.ID)
 	if err != nil {
 		return nil, fmt.Errorf("find pending fetch replays: %w", err)
@@ -123,7 +122,7 @@ func (s *Syncer) incremental(
 	checkpoint := &store.Checkpoint{}
 	var discoveryHealth pageDiscoveryHealth
 
-	// Retry the prior run's absent fetches inside this scoped run, before history
+	// Retry unresolved acquisitions inside this scoped run, before history
 	// selection, so an idle mailbox still works off its durable debt.
 	if len(pendingReplayIDs) > 0 {
 		replayedIDs, err := s.replayFetchFailures(
@@ -235,7 +234,7 @@ func (s *Syncer) incremental(
 					for i, fetch := range rawMessages {
 						raw := fetch.Message
 						if raw == nil {
-							if isGmailNotFound(fetch.Err) {
+							if isMessageGone(fetch.Err) {
 								s.logger.Debug("skipping message deleted before fetch", "id", newMsgIDs[i])
 								s.recordSyncItem(syncID, newMsgIDs[i], syncItemPhaseFetch, store.SyncRunItemStatusSkipped, syncItemKindGmailNotFound, fetch.Err)
 								continue
@@ -292,6 +291,9 @@ func (s *Syncer) incremental(
 			// Report progress
 			s.progress.OnProgress(checkpoint.MessagesProcessed, checkpoint.MessagesAdded, summary.MessagesSkipped)
 
+			if err := s.requireRecordedSyncItems(syncID); err != nil {
+				return nil, err
+			}
 			// Save checkpoint
 			pageToken = historyResp.NextPageToken
 			checkpoint.PageToken = pageToken
@@ -314,7 +316,7 @@ func (s *Syncer) incremental(
 
 	// Always advance the cursor so a single permanently-failing
 	// message doesn't block all future incremental syncs.
-	// Failed fetches carry forward to the next incremental run.
+	// Failed acquisitions remain in the durable journal for later runs.
 	historyIDStr := strconv.FormatUint(profile.HistoryID, 10)
 	if checkpoint.ErrorsCount > 0 {
 		s.logger.Warn("incremental sync completed with errors",
@@ -341,10 +343,9 @@ func (s *Syncer) incremental(
 	return summary, nil
 }
 
-// replayFetchFailures re-fetches the IDs a prior completed incremental run
-// failed to read, skipping any that already reached the archive. Reads and
-// local ingest only; a repeated failure becomes this run's fetch error and
-// carries the ID to the next run.
+// replayFetchFailures retries unresolved fetch and ingest failures from prior
+// runs, skipping IDs whose RAW already reached the archive. Diagnostics remain
+// intact; repeated failures and explicit gone skips are appended to this run.
 func (s *Syncer) replayFetchFailures(
 	ctx context.Context,
 	syncID, sourceID int64,
@@ -357,7 +358,7 @@ func (s *Syncer) replayFetchFailures(
 		return nil, nil
 	}
 
-	existing, err := s.store.MessageExistsBatch(sourceID, messageIDs)
+	existing, err := s.store.MessageExistsWithRawBatch(sourceID, messageIDs)
 	if err != nil {
 		return nil, fmt.Errorf("check replay messages: %w", err)
 	}
@@ -393,6 +394,9 @@ func (s *Syncer) replayFetchFailures(
 				s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusError, syncItemKindBatchFetchError, fetchErr)
 			}
 			checkpoint.ErrorsCount += int64(len(batchIDs))
+			if err := s.requireRecordedSyncItems(syncID); err != nil {
+				return nil, err
+			}
 			if err := s.store.UpdateSyncCheckpoint(syncID, checkpoint); err != nil {
 				return nil, fmt.Errorf("checkpoint replay batch: %w", err)
 			}
@@ -427,6 +431,9 @@ func (s *Syncer) replayFetchFailures(
 			checkpoint.MessagesAdded++
 			summary.BytesDownloaded += int64(len(result.Message.Raw))
 			successfulIDs = append(successfulIDs, messageID)
+		}
+		if err := s.requireRecordedSyncItems(syncID); err != nil {
+			return nil, err
 		}
 		if err := s.store.UpdateSyncCheckpoint(syncID, checkpoint); err != nil {
 			return nil, fmt.Errorf("checkpoint replay batch: %w", err)
@@ -484,7 +491,7 @@ func (s *Syncer) handleLabelChange(ctx context.Context, syncID, sourceID int64, 
 			checkpoint.MessagesProcessed++
 			raw, err := s.client.GetMessageRaw(ctx, messageID)
 			if err != nil {
-				if isGmailNotFound(err) {
+				if isMessageGone(err) {
 					s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusSkipped, syncItemKindGmailNotFound, err)
 					return false, false, err
 				}

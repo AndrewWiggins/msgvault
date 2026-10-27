@@ -1417,7 +1417,7 @@ func TestIncrementalSyncReplayCompletion(t *testing.T) {
 	}{
 		{name: "idle successful replay", historyID: 1001, mailboxChanged: true},
 		{name: "idle failed replay", historyID: 1001, fetchErr: errors.New("temporary fetch failure"), errors: 1},
-		{name: "idle gone message", historyID: 1001, fetchErr: &gmail.NotFoundError{Path: "/messages/replay-completion"}},
+		{name: "idle gone message", historyID: 1001, fetchErr: &gmail.NotFoundError{Path: "/messages/replay-completion"}, errors: 1},
 		{name: "new history with failed replay", historyID: 1002, fetchErr: errors.New("temporary fetch failure"), mailboxChanged: true, errors: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1571,19 +1571,18 @@ func TestIncrementalSyncSkipsGoneFetchReplay(t *testing.T) {
 	env.SetHistory(1001)
 	secondSummary, err := env.Syncer.Incremental(env.Context, source)
 	require.NoError(err, "gone replay")
-	assert.Equal(int64(0), secondSummary.Errors, "gone replay errors")
-	assert.Equal(int64(2), secondSummary.MessagesSkipped, "gone replay skipped")
+	assert.Equal(int64(1), secondSummary.Errors, "generic 404 remains retryable")
+	assert.Equal(int64(1), secondSummary.MessagesSkipped, "explicit gone is skipped")
 
 	run, err := env.Store.GetLatestSync(source.ID)
 	require.NoError(err, "gone replay run")
 	items, err := env.Store.ListSyncRunItems(run.ID, store.SyncRunItemStatusSkipped, 10)
 	require.NoError(err, "gone replay items")
-	require.Len(items, 2, "gone replay skipped items")
+	require.Len(items, 1, "only explicit gone is skipped")
 	kinds := map[string]string{}
 	for _, item := range items {
 		kinds[item.SourceMessageID] = item.ErrorKind
 	}
-	assert.Equal(syncItemKindGmailNotFound, kinds[notFoundID], "404 replay kind")
 	assert.Equal(syncItemKindMessageGone, kinds[goneID], "gone replay kind")
 
 	callsAfterGone := len(env.Mock.GetMessageCalls)
@@ -1591,7 +1590,43 @@ func TestIncrementalSyncSkipsGoneFetchReplay(t *testing.T) {
 	require.NoError(err, "refresh source after gone replay")
 	_, err = env.Syncer.Incremental(env.Context, source)
 	require.NoError(err, "following idle sync")
-	assert.Len(env.Mock.GetMessageCalls, callsAfterGone, "gone messages are not replayed again")
+	assert.Len(env.Mock.GetMessageCalls, callsAfterGone+1, "generic 404 debt is retried")
+	assert.Equal(notFoundID, env.Mock.GetMessageCalls[callsAfterGone], "explicit gone is not retried")
+}
+
+func TestAcquisitionReplayLegacyGmailNotFoundRemainsDebt(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	env := newTestEnv(t)
+	const messageID = "legacy-gmail-not-found"
+	source := env.CreateSourceWithHistory(t, "1000")
+	recordSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{
+		SourceMessageID: messageID,
+		Phase:           syncItemPhaseFetch,
+		Status:          store.SyncRunItemStatusSkipped,
+		ErrorKind:       syncItemKindGmailNotFound,
+	})
+	env.Mock.GetMessageError[messageID] = &gmail.NotFoundError{Path: "/messages/" + messageID}
+
+	first, err := env.Syncer.Incremental(env.Context, source)
+	require.NoError(err, "replay legacy 404")
+	assert.Equal(int64(1), first.Errors, "legacy 404 remains retryable")
+	assertMessageCount(t, env.Store, 0)
+	assert.Equal([]string{messageID}, env.Mock.GetMessageCalls, "legacy debt is fetched")
+
+	delete(env.Mock.GetMessageError, messageID)
+	env.Mock.AddMessage(messageID, testMIME(), []string{"INBOX"})
+	source, err = env.Store.GetSourceByID(source.ID)
+	require.NoError(err, "refresh source after legacy 404")
+	second, err := env.Syncer.Incremental(env.Context, source)
+	require.NoError(err, "recover legacy 404 debt")
+	assert.Equal(int64(1), second.MessagesAdded, "recovered message is added")
+	assertMessageCount(t, env.Store, 1)
+
+	_, err = env.Syncer.Incremental(env.Context, source)
+	require.NoError(err, "idle sync after recovery")
+	assert.Len(env.Mock.GetMessageCalls, 2, "archived RAW is not fetched again")
 }
 
 func TestIncrementalSyncFiltersFetchReplayCandidates(t *testing.T) {
@@ -1641,24 +1676,26 @@ func TestIncrementalSyncFiltersFetchReplayCandidates(t *testing.T) {
 		store.SyncRunItem{SourceMessageID: "(unknown)", Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindBatchFetchError},
 		store.SyncRunItem{SourceMessageID: presentID, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindFetchError},
 	)
-	// A later filtered or limited full run completes without establishing full
-	// Gmail coverage, so it neither contributes debt nor hides the incremental run.
+	// A later full contributes its own debt and never hides earlier failures.
 	recordSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{
 		SourceMessageID: "replay-full-run",
 		Phase:           syncItemPhaseFetch,
 		Status:          store.SyncRunItemStatusError,
 		ErrorKind:       syncItemKindFetchError,
 	})
+	for _, id := range []string{olderID, failedID, "replay-ingest", "replay-skipped", "replay-full-run"} {
+		env.Mock.AddMessage(id, testMIME(), []string{"INBOX"})
+	}
 	env.Mock.AddMessage(eligibleID, testMIME(), []string{"INBOX"})
 	env.Mock.AddMessage(batchEligible, testMIME(), []string{"INBOX"})
 	env.SetHistory(1000)
 
 	summary, err := env.Syncer.Incremental(env.Context, source)
 	require.NoError(err, "filtered replay")
-	assert.Equal(int64(2), summary.MessagesFound, "eligible replay processed")
-	assert.Equal(int64(2), summary.MessagesAdded, "eligible replay added")
+	assert.Equal(int64(7), summary.MessagesFound, "eligible replay processed")
+	assert.Equal(int64(7), summary.MessagesAdded, "eligible replay added")
 	assert.Equal(int64(0), summary.Errors, "eligible replay errors")
-	assert.Equal([]string{batchEligible, eligibleID}, env.Mock.GetMessageCalls, "only latest eligible absent IDs fetched")
+	assert.ElementsMatch([]string{olderID, failedID, eligibleID, batchEligible, "replay-ingest", "replay-skipped", "replay-full-run"}, env.Mock.GetMessageCalls, "all unresolved acquisition errors fetched")
 }
 
 func TestIncrementalSyncFetchReplayPreservesCursorAndFence(t *testing.T) {
@@ -1711,7 +1748,7 @@ func TestIncrementalSyncFetchReplayPreservesCursorAndFence(t *testing.T) {
 	})
 }
 
-func TestFullSyncSkipsGmailNotFoundBeforeFetch(t *testing.T) {
+func TestFullSyncRetainsGenericGmail404AsFetchDebt(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
@@ -1721,18 +1758,18 @@ func TestFullSyncSkipsGmailNotFoundBeforeFetch(t *testing.T) {
 	env.Mock.GetMessageError["msg2"] = &gmail.NotFoundError{Path: "/messages/msg2"}
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, WantSummary{Added: new(int64(2)), Errors: new(int64(0)), Skipped: new(int64(1))})
+	assertSummary(t, summary, WantSummary{Added: new(int64(2)), Errors: new(int64(1)), Skipped: new(int64(1))})
 
 	source, err := env.Store.GetSourceByIdentifier(testEmail)
 	require.NoError(err, "GetSourceByIdentifier")
 	run, err := env.Store.GetLastSuccessfulSync(source.ID)
 	require.NoError(err, "GetLastSuccessfulSync")
-	items, err := env.Store.ListSyncRunItems(run.ID, store.SyncRunItemStatusSkipped, 10)
+	items, err := env.Store.ListSyncRunItems(run.ID, store.SyncRunItemStatusError, 10)
 	require.NoError(err, "ListSyncRunItems")
-	require.Len(items, 1, "skipped items")
+	require.Len(items, 1, "retryable error items")
 	assert.Equal("msg2", items[0].SourceMessageID, "SourceMessageID")
 	assert.Equal("fetch", items[0].Phase, "Phase")
-	assert.Equal("gmail_not_found", items[0].ErrorKind, "ErrorKind")
+	assert.Equal("fetch_error", items[0].ErrorKind, "ErrorKind")
 }
 
 func TestStoreAttachment_ComputesHashWhenMissing(t *testing.T) {
@@ -3656,7 +3693,7 @@ func TestProcessBatch_ErrorsCount(t *testing.T) {
 	assert.Equal("fetch_error", items[0].ErrorKind, "ErrorKind")
 }
 
-func TestProcessBatch_GmailNotFoundIsSkipped(t *testing.T) {
+func TestProcessBatch_Gmail404RemainsRetryable(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
@@ -3683,14 +3720,14 @@ func TestProcessBatch_GmailNotFoundIsSkipped(t *testing.T) {
 	require.NoError(err, "processBatch")
 
 	assert.Equal(int64(1), result.added, "added")
-	assert.Equal(int64(1), result.skipped, "skipped")
-	assert.Equal(int64(0), checkpoint.ErrorsCount, "ErrorsCount")
+	assert.Equal(int64(0), result.skipped, "generic 404 is not terminal")
+	assert.Equal(int64(1), checkpoint.ErrorsCount, "ErrorsCount")
 
-	items, err := env.Store.ListSyncRunItems(syncID, store.SyncRunItemStatusSkipped, 10)
+	items, err := env.Store.ListSyncRunItems(syncID, store.SyncRunItemStatusError, 10)
 	require.NoError(err, "ListSyncRunItems")
-	require.Len(items, 1, "skipped items")
+	require.Len(items, 1, "retryable error items")
 	assert.Equal("msg2", items[0].SourceMessageID, "SourceMessageID")
-	assert.Equal("gmail_not_found", items[0].ErrorKind, "ErrorKind")
+	assert.Equal("fetch_error", items[0].ErrorKind, "ErrorKind")
 }
 
 // TestAttachmentFilePermissions verifies that attachment files are saved with
@@ -3821,7 +3858,7 @@ func TestIncrementalSyncBatchNewMessages(t *testing.T) {
 	assertMessageCount(t, env.Store, 5)
 }
 
-func TestIncrementalSyncSkipsGmailNotFoundBeforeFetch(t *testing.T) {
+func TestIncrementalSyncRetainsGenericGmail404AsFetchDebt(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
@@ -3839,16 +3876,16 @@ func TestIncrementalSyncSkipsGmailNotFoundBeforeFetch(t *testing.T) {
 	)
 
 	summary := runIncrementalSync(t, env)
-	assertSummary(t, summary, WantSummary{Found: new(int64(2)), Added: new(int64(1)), Errors: new(int64(0))})
+	assertSummary(t, summary, WantSummary{Found: new(int64(2)), Added: new(int64(1)), Errors: new(int64(1))})
 	assertMessageCount(t, env.Store, 1)
 
 	run, err := env.Store.GetLastSuccessfulSync(source.ID)
 	require.NoError(err, "GetLastSuccessfulSync")
-	items, err := env.Store.ListSyncRunItems(run.ID, store.SyncRunItemStatusSkipped, 10)
+	items, err := env.Store.ListSyncRunItems(run.ID, store.SyncRunItemStatusError, 10)
 	require.NoError(err, "ListSyncRunItems")
-	require.Len(items, 1, "skipped items")
+	require.Len(items, 1, "retryable error items")
 	assert.Equal("new-gone", items[0].SourceMessageID, "SourceMessageID")
-	assert.Equal("gmail_not_found", items[0].ErrorKind, "ErrorKind")
+	assert.Equal("fetch_error", items[0].ErrorKind, "ErrorKind")
 }
 
 func TestIncrementalSyncRecordsFetchErrors(t *testing.T) {
@@ -3910,7 +3947,7 @@ func TestIncrementalSyncRecordsLabelAddFetchErrors(t *testing.T) {
 	assert.Equal("fetch_error", items[0].ErrorKind, "ErrorKind")
 }
 
-func TestIncrementalSyncRecordsLabelAddGmailNotFound(t *testing.T) {
+func TestIncrementalSyncRecordsLabelAddGmail404AsFetchDebt(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
@@ -3926,17 +3963,17 @@ func TestIncrementalSyncRecordsLabelAddGmailNotFound(t *testing.T) {
 	)
 
 	summary := runIncrementalSync(t, env)
-	assertSummary(t, summary, WantSummary{Found: new(int64(1)), Added: new(int64(0)), Errors: new(int64(0))})
+	assertSummary(t, summary, WantSummary{Found: new(int64(1)), Added: new(int64(0)), Errors: new(int64(1))})
 	assertMessageCount(t, env.Store, 0)
 
 	run, err := env.Store.GetLastSuccessfulSync(source.ID)
 	require.NoError(err, "GetLastSuccessfulSync")
-	items, err := env.Store.ListSyncRunItems(run.ID, store.SyncRunItemStatusSkipped, 10)
+	items, err := env.Store.ListSyncRunItems(run.ID, store.SyncRunItemStatusError, 10)
 	require.NoError(err, "ListSyncRunItems")
-	require.Len(items, 1, "skipped items")
+	require.Len(items, 1, "retryable error items")
 	assert.Equal("label-gone", items[0].SourceMessageID, "SourceMessageID")
 	assert.Equal("fetch", items[0].Phase, "Phase")
-	assert.Equal("gmail_not_found", items[0].ErrorKind, "ErrorKind")
+	assert.Equal("fetch_error", items[0].ErrorKind, "ErrorKind")
 }
 
 func TestIncrementalSyncRecordsLabelAddIngestErrors(t *testing.T) {
