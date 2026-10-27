@@ -16,17 +16,19 @@ import (
 func TestAcquisitionLocalDeletionIndexUpgrade(t *testing.T) {
 	for _, name := range []string{"fresh", "existing-v13", "official-v14", "experimental-v14", "invalid-index"} {
 		t.Run(name, func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			if name == "invalid-index" && !store.IsPostgresURL(os.Getenv("MSGVAULT_TEST_DB")) {
 				t.Skip("PostgreSQL concurrent builds can leave an invalid index")
 			}
 			st, path := reopenableAcquisitionStore(t)
 			t.Cleanup(func() { require.NoError(t, st.Close()) })
 			source, err := st.GetOrCreateSource("gmail", "index@example.test")
-			require.NoError(t, err)
+			must.NoError(err)
 			other, err := st.GetOrCreateSource("gmail", "other-index@example.test")
-			require.NoError(t, err)
+			must.NoError(err)
 			conversation, err := st.EnsureConversation(other.ID, "synthetic-thread", "Synthetic upgrade")
-			require.NoError(t, err)
+			must.NoError(err)
 			archived, err := st.PersistMessage(&store.MessagePersistData{
 				Message: &store.Message{
 					SourceID: other.ID, SourceMessageID: "archived",
@@ -35,19 +37,19 @@ func TestAcquisitionLocalDeletionIndexUpgrade(t *testing.T) {
 				RawMIME:   []byte("synthetic preserved RAW"),
 				RawFormat: "mime",
 			})
-			require.NoError(t, err)
+			must.NoError(err)
 			run, err := st.StartSync(source.ID, "incremental")
-			require.NoError(t, err)
+			must.NoError(err)
 			otherRun, err := st.StartSync(other.ID, "incremental")
-			require.NoError(t, err)
-			for i := 0; i < 2; i++ {
-				require.NoError(t, st.RecordSyncRunItem(store.SyncRunItem{
+			must.NoError(err)
+			for range 2 {
+				must.NoError(st.RecordSyncRunItem(store.SyncRunItem{
 					SyncRunID: run, SourceMessageID: "same-native", Phase: "fetch",
 					Status: store.SyncRunItemStatusSkipped, ErrorKind: store.AcquisitionReplayLocalDeletion,
 					ErrorMessage: "synthetic intentional deletion",
 				}))
 			}
-			require.NoError(t, st.RecordSyncRunItem(store.SyncRunItem{
+			must.NoError(st.RecordSyncRunItem(store.SyncRunItem{
 				SyncRunID: otherRun, SourceMessageID: "same-native", Phase: "fetch",
 				Status: store.SyncRunItemStatusError, ErrorKind: "fetch_error",
 				ErrorMessage: "synthetic original diagnostic",
@@ -62,16 +64,16 @@ func TestAcquisitionLocalDeletionIndexUpgrade(t *testing.T) {
 				}
 				if name != "experimental-v14" {
 					_, err = st.DB().Exec("DROP INDEX idx_sync_run_items_local_deletion")
-					require.NoError(t, err)
+					must.NoError(err)
 				}
 				if name != "official-v14" {
 					_, err = st.DB().Exec("DELETE FROM applied_migrations WHERE name='communication_services_inline_v1'")
-					require.NoError(t, err)
+					must.NoError(err)
 					_, err = st.DB().Exec("DELETE FROM communication_services WHERE slug='inline'")
-					require.NoError(t, err)
+					must.NoError(err)
 				}
 				_, err = st.DB().Exec(st.Rebind("UPDATE archive_metadata SET value=? WHERE key='schema_version'"), version)
-				require.NoError(t, err)
+				must.NoError(err)
 				sqliteDigest, pgDigest := schemaContractDigests[13], schemaContractPostgresDigests[13]
 				switch name {
 				case "official-v14":
@@ -83,9 +85,9 @@ func TestAcquisitionLocalDeletionIndexUpgrade(t *testing.T) {
 					pgDigest = "d2ec44a7dd55a81f63467b940d842374712a2b01013734fbb62800ce17904487"
 				}
 				if st.IsPostgreSQL() {
-					require.Equal(t, pgDigest, schemaContractPostgresDigest(t, st))
+					must.Equal(pgDigest, schemaContractPostgresDigest(t, st))
 				} else {
-					require.Equal(t, sqliteDigest, schemaContractSQLiteDigest(t, st))
+					must.Equal(sqliteDigest, schemaContractSQLiteDigest(t, st))
 				}
 				if name == "invalid-index" {
 					// Duplicate local decisions make this concurrent UNIQUE build
@@ -93,44 +95,44 @@ func TestAcquisitionLocalDeletionIndexUpgrade(t *testing.T) {
 					_, err = st.DB().Exec(`CREATE UNIQUE INDEX CONCURRENTLY idx_sync_run_items_local_deletion
 						ON sync_run_items(source_message_id, sync_run_id)
 						WHERE phase='fetch' AND status='skipped' AND error_kind='acquisition_local_deletion'`)
-					require.Error(t, err)
+					must.Error(err)
 					var invalid bool
-					require.NoError(t, st.DB().QueryRow(`SELECT NOT indisvalid FROM pg_index
+					must.NoError(st.DB().QueryRow(`SELECT NOT indisvalid FROM pg_index
 						WHERE indexrelid='idx_sync_run_items_local_deletion'::regclass`).Scan(&invalid))
-					require.True(t, invalid)
+					must.True(invalid)
 				}
-				require.NoError(t, st.Close())
+				must.NoError(st.Close())
 				st, err = store.Open(path)
-				require.NoError(t, err)
-				require.Error(t, st.ValidateSchemaContext(t.Context()))
-				require.NoError(t, st.InitSchemaContext(t.Context()))
+				must.NoError(err)
+				must.Error(st.ValidateSchemaContext(t.Context()))
+				must.NoError(st.InitSchemaContext(t.Context()))
 			}
-			for reopen := 0; reopen < 2; reopen++ {
-				require.NoError(t, st.Close())
+			for range 2 {
+				must.NoError(st.Close())
 				st, err = store.Open(path)
-				require.NoError(t, err)
-				require.NoError(t, st.ValidateSchemaContext(t.Context()))
+				must.NoError(err)
+				must.NoError(st.ValidateSchemaContext(t.Context()))
 				raw, err := st.GetMessageRaw(archived)
-				require.NoError(t, err)
-				assert.Equal(t, []byte("synthetic preserved RAW"), raw)
+				must.NoError(err)
+				checks.Equal([]byte("synthetic preserved RAW"), raw)
 				version, err := st.SchemaVersionContext(t.Context())
-				require.NoError(t, err)
-				assert.Equal(t, store.SchemaVersion, version)
+				must.NoError(err)
+				checks.Equal(store.SchemaVersion, version)
 				assertCombinedSchemaObjects(t, st)
 				pending, err := st.PendingAcquisitionReplayIDs(source.ID)
-				require.NoError(t, err)
-				assert.Empty(t, pending)
+				must.NoError(err)
+				checks.Empty(pending)
 				pending, err = st.PendingAcquisitionReplayIDs(other.ID)
-				require.NoError(t, err)
-				assert.Equal(t, []string{"same-native"}, pending)
+				must.NoError(err)
+				checks.Equal([]string{"same-native"}, pending)
 				var diagnostics int
-				require.NoError(t, st.DB().QueryRow("SELECT count(*) FROM sync_run_items WHERE error_message IN ('synthetic intentional deletion','synthetic original diagnostic')").Scan(&diagnostics))
-				assert.Equal(t, 3, diagnostics)
+				must.NoError(st.DB().QueryRow("SELECT count(*) FROM sync_run_items WHERE error_message IN ('synthetic intentional deletion','synthetic original diagnostic')").Scan(&diagnostics))
+				checks.Equal(3, diagnostics)
 				_, err = st.ScopedToSync(source.ID, run).PersistMessage(&store.MessagePersistData{
 					Message: &store.Message{SourceID: source.ID, SourceMessageID: "same-native", MessageType: "email"},
 					RawMIME: []byte("synthetic raw"), RawFormat: "mime",
 				})
-				assert.ErrorIs(t, err, store.ErrAcquisitionLocallyDeleted)
+				must.ErrorIs(err, store.ErrAcquisitionLocallyDeleted)
 				_, err = st.ScopedToSync(other.ID, otherRun).PersistMessage(&store.MessagePersistData{
 					Message: &store.Message{
 						SourceID: other.ID, SourceMessageID: "same-native",
@@ -138,8 +140,8 @@ func TestAcquisitionLocalDeletionIndexUpgrade(t *testing.T) {
 					},
 					RawMIME: []byte("synthetic raw"), RawFormat: "mime",
 				})
-				require.NoError(t, err)
-				require.NoError(t, st.InitSchemaContext(t.Context()), "repeated setup must retain a valid, nonunique source-aware index")
+				must.NoError(err)
+				must.NoError(st.InitSchemaContext(t.Context()), "repeated setup must retain a valid, nonunique source-aware index")
 			}
 		})
 	}
@@ -200,33 +202,35 @@ func reopenableAcquisitionStore(t *testing.T) (*store.Store, string) {
 }
 
 func TestAcquisitionLocalDeletionDoesNotBlockInline(t *testing.T) {
+	must := require.New(t)
+	checks := assert.New(t)
 	st := testutil.NewTestStore(t)
 	gmail, err := st.GetOrCreateSource("gmail", "source-isolation@example.test")
-	require.NoError(t, err)
+	must.NoError(err)
 	inline, err := st.GetOrCreateSource("inline", "api.inline.chat:user:42")
-	require.NoError(t, err)
+	must.NoError(err)
 	run, err := st.StartSync(gmail.ID, "incremental")
-	require.NoError(t, err)
+	must.NoError(err)
 	const nativeID = "chat:123:message:7"
-	require.NoError(t, st.RecordSyncRunItem(store.SyncRunItem{
+	must.NoError(st.RecordSyncRunItem(store.SyncRunItem{
 		SyncRunID: run, SourceMessageID: nativeID, Phase: "fetch",
 		Status: store.SyncRunItemStatusSkipped, ErrorKind: store.AcquisitionReplayLocalDeletion,
 	}))
 	inlineRun, err := st.StartSync(inline.ID, "incremental")
-	require.NoError(t, err)
+	must.NoError(err)
 	conversation, err := st.EnsureConversationWithType(inline.ID, "chat:123", "group_chat", "Synthetic Inline group")
-	require.NoError(t, err)
+	must.NoError(err)
 	// Native identifiers belong to a source. An absorbing Gmail decision must
 	// not prevent an unrelated importer from persisting the same identifier.
 	id, err := st.ScopedToSync(inline.ID, inlineRun).PersistMessage(&store.MessagePersistData{
 		Message: &store.Message{SourceID: inline.ID, SourceMessageID: nativeID, ConversationID: conversation, MessageType: "chat"},
 		RawMIME: []byte(`{"synthetic":true}`), RawFormat: "json",
 	})
-	require.NoError(t, err)
+	must.NoError(err)
 	raw, err := st.GetMessageRaw(id)
-	require.NoError(t, err)
-	assert.Equal(t, []byte(`{"synthetic":true}`), raw)
+	must.NoError(err)
+	checks.Equal([]byte(`{"synthetic":true}`), raw)
 	pending, err := st.PendingAcquisitionReplayIDs(gmail.ID)
-	require.NoError(t, err)
-	assert.Empty(t, pending)
+	must.NoError(err)
+	checks.Empty(pending)
 }

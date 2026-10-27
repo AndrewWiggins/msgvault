@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,37 +93,39 @@ func TestAcquisitionReplayBulkDedupDeletionLifecycle(t *testing.T) {
 	for _, mode := range []string{"all", "all-context", "batch", "batches"} {
 		for _, fault := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/journal-failure=%t", mode, fault), func(t *testing.T) {
+				must := require.New(t)
+				checks := assert.New(t)
 				e := acquisitionReplayEnv(t)
 				s := e.CreateSourceWithHistory(t, "1000")
 				acquisitionReplayCreateAndResolveDebt(t, e, s, "native-id")
 				_, err := e.Store.DB().Exec(e.Store.Rebind("UPDATE messages SET deleted_at=CURRENT_TIMESTAMP, delete_batch_id='synthetic-batch' WHERE source_id=? AND source_message_id='native-id'"), s.ID)
-				require.NoError(t, err)
+				must.NoError(err)
 				if fault {
 					acquisitionReplayInstallFault(t, e, "local_disposition_fault", "sync_run_items", "NEW.error_kind='acquisition_local_deletion'")
 					n, err := acquisitionReplayPurge(t, e, mode)
-					require.Error(t, err)
-					assert.Zero(t, n)
+					must.Error(err)
+					checks.Zero(n)
 					acquisitionReplayReopen(t, e)
 					var rows int
-					require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM messages WHERE source_message_id='native-id'").Scan(&rows))
-					assert.Equal(t, 1, rows, "failed disposition rolls back the physical deletion")
-					assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayLocalDeletion))
+					must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM messages WHERE source_message_id='native-id'").Scan(&rows))
+					checks.Equal(1, rows, "failed disposition rolls back the physical deletion")
+					checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayLocalDeletion))
 					acquisitionReplayDropFault(t, e, "local_disposition_fault", []string{"sync_run_items"})
 				}
 				n, err := acquisitionReplayPurge(t, e, mode)
-				require.NoError(t, err)
-				assert.EqualValues(t, 1, n)
+				must.NoError(err)
+				checks.EqualValues(1, n)
 				acquisitionReplayReopen(t, e)
 				calls := len(e.Mock.GetMessageCalls)
 				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
-				require.NoError(t, err)
-				assert.Len(t, e.Mock.GetMessageCalls, calls, "explicitly destroyed occurrence must not be downloaded again")
+				must.NoError(err)
+				checks.Len(e.Mock.GetMessageCalls, calls, "explicitly destroyed occurrence must not be downloaded again")
 				acquisitionReplayAbsent(t, e, "native-id")
-				assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayLocalDeletion))
-				requireAcquisitionErrorHistory(t, e, "native-id", 1)
+				checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayLocalDeletion))
+				requireAcquisitionErrorHistory(t, e, "native-id")
 				n, err = acquisitionReplayPurge(t, e, mode)
-				require.NoError(t, err)
-				assert.Zero(t, n)
+				must.NoError(err)
+				checks.Zero(n)
 			})
 		}
 	}
@@ -130,6 +133,7 @@ func TestAcquisitionReplayBulkDedupDeletionLifecycle(t *testing.T) {
 
 type acquisitionInventoryAPI struct {
 	*gmail.MockAPI
+
 	snapshotCalls int
 	mode          string
 	beforeHistory func()
@@ -168,14 +172,16 @@ func (a *acquisitionInventoryAPI) ListHistory(ctx context.Context, h uint64, tok
 
 func TestAcquisitionReplayCompleteInventoryRetiresMissingDebt(t *testing.T) {
 	for _, fault := range []bool{false, true} {
-		t.Run(fmt.Sprint(fault), func(t *testing.T) {
+		t.Run(strconv.FormatBool(fault), func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "lost")
 			// Give reconciliation a real tombstone to roll back if journaling fails.
 			e.Mock.AddMessage("archived-then-gone", testMIME(), []string{"INBOX"})
 			e.Mock.MessagePages = [][]string{{"archived-then-gone"}}
 			_, err := e.Syncer.Full(t.Context(), testEmail)
-			require.NoError(t, err)
+			must.NoError(err)
 			delete(e.Mock.Messages, "archived-then-gone")
 			delete(e.Mock.Messages, "lost")
 			e.Mock.AddMessage("present", testMIME(), []string{"INBOX"})
@@ -187,29 +193,29 @@ func TestAcquisitionReplayCompleteInventoryRetiresMissingDebt(t *testing.T) {
 			}
 			_, err = e.Syncer.RecoverExpiredHistory(t.Context(), s)
 			if fault {
-				require.Error(t, err)
-				assert.Equal(t, "1001", acquisitionReplaySource(t, e).SyncCursor.String)
-				assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted))
+				must.Error(err)
+				checks.Equal("1001", acquisitionReplaySource(t, e).SyncCursor.String)
+				checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted))
 				assertDeletedFromSource(t, e.Store, "archived-then-gone", false)
 				acquisitionReplayReopen(t, e)
 				acquisitionReplayDropFault(t, e, "inventory_disposition_fault", []string{"sync_run_items"})
 				_, err = e.Syncer.RecoverExpiredHistory(t.Context(), acquisitionReplaySource(t, e))
 			}
-			require.NoError(t, err)
+			must.NoError(err)
 			assertDeletedFromSource(t, e.Store, "archived-then-gone", true)
 			acquisitionReplayReopen(t, e)
 			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
-			assert.Empty(t, pending, "absence is acknowledged even without an archive row")
+			must.NoError(err)
+			checks.Empty(pending, "absence is acknowledged even without an archive row")
 			calls := len(e.Mock.GetMessageCalls)
 			_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
-			require.NoError(t, err)
-			assert.Len(t, e.Mock.GetMessageCalls, calls)
-			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted))
+			must.NoError(err)
+			checks.Len(e.Mock.GetMessageCalls, calls)
+			checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted))
 			_, err = e.Syncer.RecoverExpiredHistory(t.Context(), acquisitionReplaySource(t, e))
-			require.NoError(t, err)
-			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted), "inventory acknowledgement is idempotent")
-			requireAcquisitionErrorHistory(t, e, "lost", 1)
+			must.NoError(err)
+			checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted), "inventory acknowledgement is idempotent")
+			requireAcquisitionErrorHistory(t, e, "lost")
 		})
 	}
 }
@@ -217,6 +223,8 @@ func TestAcquisitionReplayCompleteInventoryRetiresMissingDebt(t *testing.T) {
 func TestAcquisitionReplayInvalidInventoryKeepsDebt(t *testing.T) {
 	for _, mode := range []string{"cancel", "page-error", "cycle", "query", "limit", "ordinary-filtered-full", "special", "still-present"} {
 		t.Run(mode, func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "lost")
 			e.Mock.AddMessage("present", testMIME(), []string{"INBOX"})
@@ -241,20 +249,20 @@ func TestAcquisitionReplayInvalidInventoryKeepsDebt(t *testing.T) {
 				_, err = e.Syncer.RecoverExpiredHistory(t.Context(), s)
 			}
 			if mode == "special" || mode == "still-present" || mode == "ordinary-filtered-full" {
-				require.NoError(t, err)
+				must.NoError(err)
 			} else {
-				require.Error(t, err)
+				must.Error(err)
 			}
 			acquisitionReplayReopen(t, e)
 			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
-			assert.Contains(t, pending, "lost")
-			assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted))
+			must.NoError(err)
+			checks.Contains(pending, "lost")
+			checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted))
 			delete(e.Mock.GetMessageError, "lost")
 			e.SetHistory(15000)
 			e.Syncer = New(e.Mock, e.Store, nil)
 			_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
-			require.NoError(t, err)
+			must.NoError(err)
 			acquisitionReplayRaw(t, e, "lost")
 		})
 	}
@@ -263,77 +271,79 @@ func TestAcquisitionReplayInvalidInventoryKeepsDebt(t *testing.T) {
 func TestAcquisitionReplayLifecycleTransitionMatrix(t *testing.T) {
 	for _, transition := range []string{"unresolved", "acquired", "accidental-raw-loss", "local-deletion", "dedup-destruction", "history-deleted", "inventory-deleted", "ambiguous-404", "incomplete-inventory"} {
 		t.Run(transition, func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "native-id")
 			acquired := transition == "acquired" || transition == "accidental-raw-loss" || transition == "local-deletion" || transition == "dedup-destruction"
 			if acquired {
 				delete(e.Mock.GetMessageError, "native-id")
 				_, err := e.Syncer.Incremental(t.Context(), s)
-				require.NoError(t, err)
+				must.NoError(err)
 				acquisitionReplayRaw(t, e, "native-id")
 			}
 			switch transition {
 			case "accidental-raw-loss":
 				_, err := e.Store.DB().Exec(e.Store.Rebind("DELETE FROM message_raw WHERE message_id=(SELECT id FROM messages WHERE source_id=? AND source_message_id='native-id')"), s.ID)
-				require.NoError(t, err)
+				must.NoError(err)
 			case "local-deletion", "dedup-destruction":
 				_, err := e.Store.DB().Exec("UPDATE messages SET deleted_at=CURRENT_TIMESTAMP, delete_batch_id='synthetic-batch'")
-				require.NoError(t, err)
+				must.NoError(err)
 				mode := "batch"
 				if transition == "dedup-destruction" {
 					mode = "all"
 				}
 				_, err = acquisitionReplayPurge(t, e, mode)
-				require.NoError(t, err)
+				must.NoError(err)
 			case "history-deleted":
 				e.SetHistory(2000, historyDeleted("native-id"))
 				_, err := e.Syncer.Incremental(t.Context(), s)
-				require.NoError(t, err)
+				must.NoError(err)
 				e.SetHistory(2000)
 			case "inventory-deleted":
 				delete(e.Mock.Messages, "native-id")
 				e.Mock.MessagePages = [][]string{{}}
 				e.SetHistory(2000)
 				_, err := e.Syncer.RecoverExpiredHistory(t.Context(), s)
-				require.NoError(t, err)
+				must.NoError(err)
 			case "ambiguous-404":
 				e.Mock.GetMessageError["native-id"] = &gmail.NotFoundError{Path: "/messages/native-id"}
 				_, err := e.Syncer.Incremental(t.Context(), s)
-				require.NoError(t, err)
+				must.NoError(err)
 			case "incomplete-inventory":
 				e.Syncer = New(&acquisitionInventoryAPI{MockAPI: e.Mock, mode: "page-error"}, e.Store, nil)
 				_, err := e.Syncer.RecoverExpiredHistory(t.Context(), s)
-				require.Error(t, err)
+				must.Error(err)
 			}
 			acquisitionReplayReopen(t, e)
 			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
+			must.NoError(err)
 			wantPending := transition == "unresolved" || transition == "accidental-raw-loss" || transition == "ambiguous-404" || transition == "incomplete-inventory"
 			if wantPending {
-				assert.Contains(t, pending, "native-id")
+				checks.Contains(pending, "native-id")
 			} else {
-				assert.Empty(t, pending)
+				checks.Empty(pending)
 			}
 			var diagnostics int
-			require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM sync_run_items WHERE source_message_id='native-id' AND status='error'").Scan(&diagnostics))
-			assert.GreaterOrEqual(t, diagnostics, 1)
+			must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM sync_run_items WHERE source_message_id='native-id' AND status='error'").Scan(&diagnostics))
+			checks.GreaterOrEqual(diagnostics, 1)
 			// With the fault repaired, only live debt should fetch on an idle sync.
 			delete(e.Mock.GetMessageError, "native-id")
 			e.Mock.HistoryRecords = nil
 			e.Syncer = New(e.Mock, e.Store, nil)
 			calls := len(e.Mock.GetMessageCalls)
 			_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
-			require.NoError(t, err)
+			must.NoError(err)
 			if wantPending {
-				assert.Len(t, e.Mock.GetMessageCalls, calls+1)
+				checks.Len(e.Mock.GetMessageCalls, calls+1)
 				acquisitionReplayRaw(t, e, "native-id")
 			} else {
-				assert.Len(t, e.Mock.GetMessageCalls, calls)
+				checks.Len(e.Mock.GetMessageCalls, calls)
 			}
 			acquisitionReplayReopen(t, e)
 			pending, err = e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
-			assert.Empty(t, pending)
+			must.NoError(err)
+			checks.Empty(pending)
 		})
 	}
 }
@@ -345,12 +355,14 @@ func TestAcquisitionReplaySuccessfulHistoryAcquisitionSupersedesSourceDeletion(t
 			name = "full"
 		}
 		t.Run(name, func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "native-id")
 			e.SetHistory(1002, historyDeleted("native-id"))
 			_, err := e.Syncer.Incremental(t.Context(), s)
-			require.NoError(t, err)
-			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplaySourceDeleted))
+			must.NoError(err)
+			checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplaySourceDeleted))
 
 			delete(e.Mock.GetMessageError, "native-id")
 			e.SetHistory(1003, historyAdded("native-id"))
@@ -360,24 +372,24 @@ func TestAcquisitionReplaySuccessfulHistoryAcquisitionSupersedesSourceDeletion(t
 			} else {
 				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
 			}
-			require.NoError(t, err)
+			must.NoError(err)
 			acquisitionReplayRaw(t, e, "native-id")
-			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayResolved),
+			checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayResolved),
 				"successful RAW persistence must supersede an earlier source-deletion disposition")
 
 			_, err = e.Store.DB().Exec(e.Store.Rebind(`DELETE FROM message_raw WHERE message_id=(
 				SELECT id FROM messages WHERE source_id=? AND source_message_id='native-id')`), s.ID)
-			require.NoError(t, err)
+			must.NoError(err)
 			acquisitionReplayReopen(t, e)
 			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
-			assert.Contains(t, pending, "native-id", "unexpected RAW loss must reopen the successful acquisition")
+			must.NoError(err)
+			checks.Contains(pending, "native-id", "unexpected RAW loss must reopen the successful acquisition")
 
 			calls := len(e.Mock.GetMessageCalls)
 			e.SetHistory(1003)
 			_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
-			require.NoError(t, err)
-			assert.Len(t, e.Mock.GetMessageCalls, calls+1, "inactive History must still replay missing RAW")
+			must.NoError(err)
+			checks.Len(e.Mock.GetMessageCalls, calls+1, "inactive History must still replay missing RAW")
 			acquisitionReplayRaw(t, e, "native-id")
 		})
 	}
@@ -390,11 +402,13 @@ func TestAcquisitionReplayResolutionRollsBackWithRAW(t *testing.T) {
 			name = "full"
 		}
 		t.Run(name, func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "native-id")
 			e.SetHistory(1002, historyDeleted("native-id"))
 			_, err := e.Syncer.Incremental(t.Context(), s)
-			require.NoError(t, err)
+			must.NoError(err)
 			delete(e.Mock.GetMessageError, "native-id")
 			if full {
 				e.Mock.MessagePages = [][]string{{"native-id"}}
@@ -407,17 +421,17 @@ func TestAcquisitionReplayResolutionRollsBackWithRAW(t *testing.T) {
 			} else {
 				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
 			}
-			require.NoError(t, err, "the failed atomic persist is retained as replay debt")
-			assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayResolved))
+			must.NoError(err, "the failed atomic persist is retained as replay debt")
+			checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayResolved))
 			var messageRows, rawRows int
-			require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind(`SELECT count(*) FROM messages WHERE source_id=? AND source_message_id='native-id'`), s.ID).Scan(&messageRows))
-			require.NoError(t, e.Store.DB().QueryRow(`SELECT count(*) FROM message_raw`).Scan(&rawRows))
-			assert.Zero(t, messageRows, "message row rolls back with failed resolution")
-			assert.Zero(t, rawRows, "RAW rolls back with failed resolution")
+			must.NoError(e.Store.DB().QueryRow(e.Store.Rebind(`SELECT count(*) FROM messages WHERE source_id=? AND source_message_id='native-id'`), s.ID).Scan(&messageRows))
+			must.NoError(e.Store.DB().QueryRow(`SELECT count(*) FROM message_raw`).Scan(&rawRows))
+			checks.Zero(messageRows, "message row rolls back with failed resolution")
+			checks.Zero(rawRows, "RAW rolls back with failed resolution")
 			acquisitionReplayReopen(t, e)
 			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
-			assert.Contains(t, pending, "native-id")
+			must.NoError(err)
+			checks.Contains(pending, "native-id")
 			acquisitionReplayDropFault(t, e, "resolved_disposition_fault", []string{"sync_run_items"})
 
 			// The error is now replayable without another History record or full
@@ -428,10 +442,10 @@ func TestAcquisitionReplayResolutionRollsBackWithRAW(t *testing.T) {
 				e.SetHistory(1003)
 				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
 			}
-			require.NoError(t, err)
+			must.NoError(err)
 			acquisitionReplayReopen(t, e)
 			acquisitionReplayRaw(t, e, "native-id")
-			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayResolved))
+			checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "native-id", store.AcquisitionReplayResolved))
 		})
 	}
 }
@@ -439,6 +453,8 @@ func TestAcquisitionReplayResolutionRollsBackWithRAW(t *testing.T) {
 func TestAcquisitionReplayInventoryHistoryHandoff(t *testing.T) {
 	for _, outcome := range []string{"acquired", "fetch-error", "journal-error", "history-error"} {
 		t.Run(outcome, func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "lost")
 			e.Mock.MessagePages = [][]string{{}}
@@ -461,39 +477,39 @@ func TestAcquisitionReplayInventoryHistoryHandoff(t *testing.T) {
 			e.Syncer = New(seq, e.Store, nil)
 			_, err := e.Syncer.RecoverExpiredHistory(t.Context(), s)
 			if outcome == "journal-error" || outcome == "history-error" {
-				require.Error(t, err)
-				assert.NotEqual(t, "20000", acquisitionReplaySource(t, e).SyncCursor.String, "no final cursor after failed catch-up")
+				must.Error(err)
+				checks.NotEqual("20000", acquisitionReplaySource(t, e).SyncCursor.String, "no final cursor after failed catch-up")
 			} else {
-				require.NoError(t, err)
+				must.NoError(err)
 			}
-			assert.Equal(t, []uint64{15000}, e.Mock.HistoryCalls, "history must bridge all changes since before inventory")
+			checks.Equal([]uint64{15000}, e.Mock.HistoryCalls, "history must bridge all changes since before inventory")
 			if outcome == "journal-error" {
 				acquisitionReplayDropFault(t, e, "catchup_journal_fault", []string{"sync_run_items"})
 			}
 			acquisitionReplayReopen(t, e)
 			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
+			must.NoError(err)
 			if outcome == "fetch-error" {
-				assert.Contains(t, pending, "lost")
+				checks.Contains(pending, "lost")
 			} else {
-				assert.Empty(t, pending)
+				checks.Empty(pending)
 			}
-			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted))
+			checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplaySourceDeleted))
 			if outcome == "acquired" {
-				assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplayResolved),
+				checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "lost", store.AcquisitionReplayResolved),
 					"History catch-up from H=15000 must durably resolve the inventory disposition")
 				_, err = e.Store.DB().Exec(e.Store.Rebind(`DELETE FROM message_raw WHERE message_id=(
 					SELECT id FROM messages WHERE source_id=? AND source_message_id='lost')`), s.ID)
-				require.NoError(t, err)
+				must.NoError(err)
 				acquisitionReplayReopen(t, e)
 				pending, err = e.Store.PendingAcquisitionReplayIDs(s.ID)
-				require.NoError(t, err)
-				assert.Contains(t, pending, "lost", "a later missing RAW reopens the H=15000 acquisition")
+				must.NoError(err)
+				checks.Contains(pending, "lost", "a later missing RAW reopens the H=15000 acquisition")
 				calls := len(e.Mock.GetMessageCalls)
 				e.SetHistory(20000)
 				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
-				require.NoError(t, err)
-				assert.Len(t, e.Mock.GetMessageCalls, calls+1, "inactive History still repairs the missing RAW")
+				must.NoError(err)
+				checks.Len(e.Mock.GetMessageCalls, calls+1, "inactive History still repairs the missing RAW")
 				acquisitionReplayRaw(t, e, "lost")
 			}
 			delete(e.Mock.GetMessageError, "lost")
@@ -501,7 +517,7 @@ func TestAcquisitionReplayInventoryHistoryHandoff(t *testing.T) {
 			e.SetHistory(20000, historyAdded("lost"))
 			e.Syncer = New(e.Mock, e.Store, nil)
 			_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
-			require.NoError(t, err)
+			must.NoError(err)
 			acquisitionReplayRaw(t, e, "lost")
 		})
 	}
@@ -509,6 +525,7 @@ func TestAcquisitionReplayInventoryHistoryHandoff(t *testing.T) {
 
 type acquisitionHandoffAPI struct {
 	*acquisitionInventoryAPI
+
 	profiles int
 }
 
@@ -518,50 +535,54 @@ func (a *acquisitionHandoffAPI) GetProfile(ctx context.Context) (*gmail.Profile,
 	if err != nil {
 		return nil, err
 	}
-	copy := *p
+	profile := *p
 	if a.profiles == 1 {
-		copy.HistoryID = 15000
+		profile.HistoryID = 15000
 	} else {
-		copy.HistoryID = 20000
+		profile.HistoryID = 20000
 	}
-	return &copy, nil
+	return &profile, nil
 }
 
 func TestAcquisitionReplayInventoryKeepsNativeSourceIdentity(t *testing.T) {
+	must := require.New(t)
+	checks := assert.New(t)
 	e := acquisitionReplayEnv(t)
 	s := acquisitionReplayDebt(t, e, "shared-native-id")
 	other, err := e.Store.GetOrCreateSource("gmail", "other@example.com")
-	require.NoError(t, err)
+	must.NoError(err)
 	recordSyncRunItems(t, e, other.ID, store.SyncStatusCompleted, store.SyncRunItem{SourceMessageID: "shared-native-id", Phase: "fetch", Status: "error", ErrorKind: "fetch_error"})
 	delete(e.Mock.Messages, "shared-native-id")
 	e.Mock.MessagePages = [][]string{{}}
 	e.SetHistory(15000)
 	_, err = e.Syncer.RecoverExpiredHistory(t.Context(), s)
-	require.NoError(t, err)
+	must.NoError(err)
 	acquisitionReplayReopen(t, e)
 	pending, err := e.Store.PendingAcquisitionReplayIDs(other.ID)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"shared-native-id"}, pending)
-	assert.Zero(t, acquisitionReplayDispositions(t, e, other.ID, "shared-native-id", store.AcquisitionReplaySourceDeleted))
-	assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "shared-native-id", store.AcquisitionReplaySourceDeleted))
+	must.NoError(err)
+	checks.Equal([]string{"shared-native-id"}, pending)
+	checks.Zero(acquisitionReplayDispositions(t, e, other.ID, "shared-native-id", store.AcquisitionReplaySourceDeleted))
+	checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "shared-native-id", store.AcquisitionReplaySourceDeleted))
 }
 
 func TestAcquisitionReplayDedupTransactionAndSourceIdentity(t *testing.T) {
 	for _, all := range []bool{false, true} {
-		t.Run(fmt.Sprint(all), func(t *testing.T) {
+		t.Run(strconv.FormatBool(all), func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := e.CreateSourceWithHistory(t, "1000")
 			for _, id := range []string{"first-native-id", "second-native-id"} {
 				acquisitionReplayCreateAndResolveDebt(t, e, s, id)
 				_, err := e.Store.DB().Exec(e.Store.Rebind("UPDATE messages SET deleted_at=CURRENT_TIMESTAMP,delete_batch_id=? WHERE source_id=? AND source_message_id=?"), id, s.ID, id)
-				require.NoError(t, err)
+				must.NoError(err)
 			}
 			other, err := e.Store.GetOrCreateSource("gmail", "other@example.com")
-			require.NoError(t, err)
+			must.NoError(err)
 			conversation, err := e.Store.EnsureConversation(other.ID, "control-thread", "Synthetic control")
-			require.NoError(t, err)
+			must.NoError(err)
 			_, err = e.Store.UpsertMessage(&store.Message{SourceID: other.ID, SourceMessageID: "first-native-id", ConversationID: conversation, MessageType: "email"})
-			require.NoError(t, err)
+			must.NoError(err)
 			recordSyncRunItems(t, e, other.ID, store.SyncStatusCompleted, store.SyncRunItem{SourceMessageID: "first-native-id", Phase: "fetch", Status: "error", ErrorKind: "fetch_error"})
 			purge := func() (int64, error) {
 				if all {
@@ -572,29 +593,29 @@ func TestAcquisitionReplayDedupTransactionAndSourceIdentity(t *testing.T) {
 			}
 			acquisitionReplayInstallFault(t, e, "second_local_fault", "sync_run_items", "NEW.error_kind='acquisition_local_deletion' AND NEW.source_message_id='second-native-id'")
 			n, err := purge()
-			require.Error(t, err)
-			assert.Zero(t, n)
+			must.Error(err)
+			checks.Zero(n)
 			acquisitionReplayReopen(t, e)
 			for _, id := range []string{"first-native-id", "second-native-id"} {
-				assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, id, store.AcquisitionReplayLocalDeletion))
+				checks.Zero(acquisitionReplayDispositions(t, e, s.ID, id, store.AcquisitionReplayLocalDeletion))
 				var rows int
-				require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind("SELECT count(*) FROM messages WHERE source_id=? AND source_message_id=?"), s.ID, id).Scan(&rows))
-				assert.Equal(t, 1, rows, "both deletion and earlier dispositions roll back")
+				must.NoError(e.Store.DB().QueryRow(e.Store.Rebind("SELECT count(*) FROM messages WHERE source_id=? AND source_message_id=?"), s.ID, id).Scan(&rows))
+				checks.Equal(1, rows, "both deletion and earlier dispositions roll back")
 			}
 			acquisitionReplayDropFault(t, e, "second_local_fault", []string{"sync_run_items"})
 			n, err = purge()
-			require.NoError(t, err)
-			assert.EqualValues(t, 2, n)
+			must.NoError(err)
+			checks.EqualValues(2, n)
 			acquisitionReplayReopen(t, e)
 			pending, err := e.Store.PendingAcquisitionReplayIDs(other.ID)
-			require.NoError(t, err)
-			assert.Equal(t, []string{"first-native-id"}, pending, "native ID is scoped to its source")
-			assert.Zero(t, acquisitionReplayDispositions(t, e, other.ID, "first-native-id", store.AcquisitionReplayLocalDeletion))
+			must.NoError(err)
+			checks.Equal([]string{"first-native-id"}, pending, "native ID is scoped to its source")
+			checks.Zero(acquisitionReplayDispositions(t, e, other.ID, "first-native-id", store.AcquisitionReplayLocalDeletion))
 			for _, id := range []string{"first-native-id", "second-native-id"} {
-				assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, id, store.AcquisitionReplayLocalDeletion))
+				checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, id, store.AcquisitionReplayLocalDeletion))
 				var diagnostics int
-				require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind("SELECT count(*) FROM sync_run_items item JOIN sync_runs run ON run.id=item.sync_run_id WHERE run.source_id=? AND item.source_message_id=? AND item.status='error'"), s.ID, id).Scan(&diagnostics))
-				assert.Equal(t, 1, diagnostics)
+				must.NoError(e.Store.DB().QueryRow(e.Store.Rebind("SELECT count(*) FROM sync_run_items item JOIN sync_runs run ON run.id=item.sync_run_id WHERE run.source_id=? AND item.source_message_id=? AND item.status='error'"), s.ID, id).Scan(&diagnostics))
+				checks.Equal(1, diagnostics)
 			}
 		})
 	}

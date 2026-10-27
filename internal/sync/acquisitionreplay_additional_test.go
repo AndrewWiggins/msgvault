@@ -13,6 +13,7 @@ func TestAcquisitionReplayRepeatedFailuresAndBoundedFull(t *testing.T) {
 	for _, origin := range []string{"incremental", "full"} {
 		for _, scope := range []string{"query", "limit"} {
 			t.Run(origin+"/"+scope, func(t *testing.T) {
+				must := require.New(t)
 				e := acquisitionReplayEnv(t)
 				s := e.CreateSourceWithHistory(t, "1000")
 				e.Mock.AddMessage("lost", testMIME(), []string{"INBOX"})
@@ -26,14 +27,14 @@ func TestAcquisitionReplayRepeatedFailuresAndBoundedFull(t *testing.T) {
 				} else {
 					first, err = e.Syncer.Incremental(e.Context, s)
 				}
-				require.NoError(t, err)
-				require.Equal(t, int64(1), first.Errors)
+				must.NoError(err)
+				must.Equal(int64(1), first.Errors)
 				e.SetHistory(1001)
-				for i := 0; i < 2; i++ {
+				for range 2 {
 					acquisitionReplayReopen(t, e)
 					retry, err := e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-					require.NoError(t, err)
-					require.Equal(t, int64(1), retry.Errors)
+					must.NoError(err)
+					must.Equal(int64(1), retry.Errors)
 					acquisitionReplayAbsent(t, e, "lost")
 				}
 				acquisitionReplayDrop(t, e)
@@ -48,23 +49,23 @@ func TestAcquisitionReplayRepeatedFailuresAndBoundedFull(t *testing.T) {
 				}
 				e.Syncer = New(e.Mock, e.Store, opts)
 				_, err = e.Syncer.Full(e.Context, testEmail)
-				require.NoError(t, err)
+				must.NoError(err)
 				acquisitionReplayReopen(t, e)
 				retry, err := e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-				require.NoError(t, err)
-				require.Equal(t, int64(1), retry.MessagesAdded)
+				must.NoError(err)
+				must.Equal(int64(1), retry.MessagesAdded)
 				acquisitionReplayRaw(t, e, "lost")
 				calls := len(e.Mock.GetMessageCalls)
 				acquisitionReplayReopen(t, e)
 				_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-				require.NoError(t, err)
-				require.Len(t, e.Mock.GetMessageCalls, calls)
+				must.NoError(err)
+				must.Len(e.Mock.GetMessageCalls, calls)
 				var n int
-				require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM messages WHERE source_message_id='lost'").Scan(&n))
-				require.Equal(t, 1, n)
+				must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM messages WHERE source_message_id='lost'").Scan(&n))
+				must.Equal(1, n)
 				var diagnostics int
-				require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM sync_run_items WHERE source_message_id='lost' AND status='error'").Scan(&diagnostics))
-				require.Equal(t, 3, diagnostics)
+				must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM sync_run_items WHERE source_message_id='lost' AND status='error'").Scan(&diagnostics))
+				must.Equal(3, diagnostics)
 			})
 		}
 	}
@@ -73,6 +74,7 @@ func TestAcquisitionReplayRepeatedFailuresAndBoundedFull(t *testing.T) {
 func TestAcquisitionReplayJournalFailureDoesNotPublishProgress(t *testing.T) {
 	for _, kind := range []string{"incremental", "full"} {
 		t.Run(kind, func(t *testing.T) {
+			must := require.New(t)
 			e := acquisitionReplayEnv(t)
 			s := e.CreateSourceWithHistory(t, "1000")
 			seedMessages(e, 2, 1001, "lost", "other")
@@ -86,11 +88,11 @@ func TestAcquisitionReplayJournalFailureDoesNotPublishProgress(t *testing.T) {
 			} else {
 				_, err = e.Syncer.Full(e.Context, testEmail)
 			}
-			require.ErrorContains(t, err, "persist acquisition diagnostics")
-			require.Equal(t, "1000", acquisitionReplaySource(t, e).SyncCursor.String)
+			must.ErrorContains(err, "persist acquisition diagnostics")
+			must.Equal("1000", acquisitionReplaySource(t, e).SyncCursor.String)
 			var token string
-			require.NoError(t, e.Store.DB().QueryRow("SELECT COALESCE(cursor_before,'') FROM sync_runs ORDER BY id DESC LIMIT 1").Scan(&token))
-			require.Empty(t, token)
+			must.NoError(e.Store.DB().QueryRow("SELECT COALESCE(cursor_before,'') FROM sync_runs ORDER BY id DESC LIMIT 1").Scan(&token))
+			must.Empty(token)
 			acquisitionReplayDropFault(t, e, "fail_journal", []string{"sync_run_items"})
 			delete(e.Mock.GetMessageError, "lost")
 			acquisitionReplayReopen(t, e)
@@ -99,13 +101,14 @@ func TestAcquisitionReplayJournalFailureDoesNotPublishProgress(t *testing.T) {
 			} else {
 				_, err = e.Syncer.Full(e.Context, testEmail)
 			}
-			require.NoError(t, err)
+			must.NoError(err)
 			acquisitionReplayRaw(t, e, "lost")
 		})
 	}
 }
 
 func TestAcquisitionReplayDebtLegacyGoneAndSourceIsolation(t *testing.T) {
+	must := require.New(t)
 	e := acquisitionReplayEnv(t)
 	s := e.CreateSourceWithHistory(t, "1000")
 	// Legacy untyped, failed run: no inference from counters or cursors needed.
@@ -113,81 +116,83 @@ func TestAcquisitionReplayDebtLegacyGoneAndSourceIsolation(t *testing.T) {
 		store.SyncRunItem{SourceMessageID: "lost", Phase: "ingest", Status: "error", ErrorKind: "ingest_error"},
 		store.SyncRunItem{SourceMessageID: "gone", Phase: "fetch", Status: "error", ErrorKind: "fetch_error"})
 	_, err := e.Store.DB().Exec(e.Store.Rebind("UPDATE sync_runs SET sync_type='' WHERE source_id=?"), s.ID)
-	require.NoError(t, err)
+	must.NoError(err)
 	other, err := e.Store.GetOrCreateSource("gmail", "other@example.com")
-	require.NoError(t, err)
+	must.NoError(err)
 	recordSyncRunItems(t, e, other.ID, store.SyncStatusCompleted, store.SyncRunItem{SourceMessageID: "foreign", Phase: "fetch", Status: "error", ErrorKind: "fetch_error"})
 	e.Mock.AddMessage("lost", testMIME(), []string{"INBOX"})
 	e.Mock.GetMessageError["gone"] = gmail.ErrMessageGone
 	first, err := e.Syncer.Incremental(e.Context, s)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), first.MessagesAdded)
-	require.Equal(t, int64(1), first.MessagesSkipped)
+	must.NoError(err)
+	must.Equal(int64(1), first.MessagesAdded)
+	must.Equal(int64(1), first.MessagesSkipped)
 	acquisitionReplayRaw(t, e, "lost")
-	require.NotContains(t, e.Mock.GetMessageCalls, "foreign")
+	must.NotContains(e.Mock.GetMessageCalls, "foreign")
 	calls := len(e.Mock.GetMessageCalls)
 	acquisitionReplayReopen(t, e)
 	_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-	require.NoError(t, err)
-	require.Len(t, e.Mock.GetMessageCalls, calls)
+	must.NoError(err)
+	must.Len(e.Mock.GetMessageCalls, calls)
 	// A newer failure must re-open debt even after a durable gone acknowledgment.
-	recordIncrementalSyncRunItems(t, e, s.ID, store.SyncStatusCompleted, store.SyncRunItem{SourceMessageID: "gone", Phase: "fetch", Status: "error", ErrorKind: "fetch_error"})
+	recordIncrementalSyncRunItems(t, e, s.ID, store.SyncRunItem{SourceMessageID: "gone", Phase: "fetch", Status: "error", ErrorKind: "fetch_error"})
 	delete(e.Mock.GetMessageError, "gone")
 	e.Mock.AddMessage("gone", testMIME(), nil)
 	_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-	require.NoError(t, err)
+	must.NoError(err)
 	acquisitionReplayRaw(t, e, "gone")
 }
 
 func TestAcquisitionReplayGeneric404RemainsDebt(t *testing.T) {
+	must := require.New(t)
 	e := acquisitionReplayEnv(t)
 	s := e.CreateSourceWithHistory(t, "1000")
-	recordIncrementalSyncRunItems(t, e, s.ID, store.SyncStatusCompleted,
+	recordIncrementalSyncRunItems(t, e, s.ID,
 		store.SyncRunItem{SourceMessageID: "404-id", Phase: "fetch", Status: "error", ErrorKind: "fetch_error"})
 	e.Mock.GetMessageError["404-id"] = &gmail.NotFoundError{Path: "synthetic-404"}
 	first, err := e.Syncer.Incremental(e.Context, s)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), first.Errors)
+	must.NoError(err)
+	must.Equal(int64(1), first.Errors)
 	acquisitionReplayAbsent(t, e, "404-id")
 	second404, err := e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-	require.NoError(t, err)
-	require.Equal(t, int64(1), second404.Errors)
+	must.NoError(err)
+	must.Equal(int64(1), second404.Errors)
 	acquisitionReplayAbsent(t, e, "404-id")
 	// The generic-404 classification must survive a normal database reopen.
 	acquisitionReplayReopen(t, e)
-	require.Len(t, e.Mock.GetMessageCalls, 2, "both 404 attempts occurred before reopen")
+	must.Len(e.Mock.GetMessageCalls, 2, "both 404 attempts occurred before reopen")
 	delete(e.Mock.GetMessageError, "404-id")
 	e.Mock.AddMessage("404-id", testMIME(), nil)
 	third, err := e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-	require.NoError(t, err)
-	require.Equal(t, int64(1), third.MessagesAdded)
+	must.NoError(err)
+	must.Equal(int64(1), third.MessagesAdded)
 	acquisitionReplayRaw(t, e, "404-id")
 }
 
 func TestAcquisitionReplayResolvedDebtSurvivesSourceDeletionAndGC(t *testing.T) {
+	must := require.New(t)
 	e := acquisitionReplayEnv(t)
 	s := e.CreateSourceWithHistory(t, "1000")
 	acquisitionReplayCreateAndResolveDebt(t, e, s, "source-delete")
-	require.NoError(t, e.Store.MarkMessageDeleted(s.ID, "source-delete"))
+	must.NoError(e.Store.MarkMessageDeleted(s.ID, "source-delete"))
 	acquisitionReplayReopen(t, e)
 	calls := len(e.Mock.GetMessageCalls)
 	_, err := e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-	require.NoError(t, err)
-	require.Len(t, e.Mock.GetMessageCalls, calls, "source deletion tombstone resolves the replay")
+	must.NoError(err)
+	must.Len(e.Mock.GetMessageCalls, calls, "source deletion tombstone resolves the replay")
 	if e.Store.IsPostgreSQL() {
 		return // archive GC is intentionally SQLite-only
 	}
 	plan, err := e.Store.PlanGCContext(e.Context)
-	require.NoError(t, err)
+	must.NoError(err)
 	deleted, err := e.Store.ExecuteGCContext(e.Context, plan)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), deleted)
+	must.NoError(err)
+	must.Equal(int64(1), deleted)
 	acquisitionReplayReopen(t, e)
 	calls = len(e.Mock.GetMessageCalls)
 	_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-	require.NoError(t, err)
-	require.Len(t, e.Mock.GetMessageCalls, calls, "Gmail-deleted message must not be reacquired after GC")
-	requireAcquisitionErrorHistory(t, e, "source-delete", 1)
+	must.NoError(err)
+	must.Len(e.Mock.GetMessageCalls, calls, "Gmail-deleted message must not be reacquired after GC")
+	requireAcquisitionErrorHistory(t, e, "source-delete")
 }
 
 func acquisitionReplayCreateAndResolveDebt(t *testing.T, e *TestEnv, s *store.Source, id string) {
@@ -206,7 +211,7 @@ func acquisitionReplayCreateAndResolveDebt(t *testing.T, e *TestEnv, s *store.So
 	require.NoError(t, err)
 	require.Equal(t, int64(1), recovered.MessagesAdded)
 	acquisitionReplayRaw(t, e, id)
-	requireAcquisitionErrorHistory(t, e, id, 1)
+	requireAcquisitionErrorHistory(t, e, id)
 	var resolved int
 	require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind(`
 		SELECT count(*) FROM sync_run_items WHERE source_message_id=? AND error_kind=?`),
@@ -214,28 +219,29 @@ func acquisitionReplayCreateAndResolveDebt(t *testing.T, e *TestEnv, s *store.So
 	require.Equal(t, 1, resolved, "successful recovery decision is durable")
 }
 
-func requireAcquisitionErrorHistory(t *testing.T, e *TestEnv, id string, want int) {
+func requireAcquisitionErrorHistory(t *testing.T, e *TestEnv, id string) {
 	t.Helper()
 	var count int
 	require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind(`
 		SELECT count(*) FROM sync_run_items WHERE source_message_id=? AND status='error'`), id).Scan(&count))
-	require.Equal(t, want, count, "diagnostic history remains append-only")
+	require.Equal(t, 1, count, "diagnostic history remains append-only")
 }
 
 func TestAcquisitionReplayReplayRepairsMessageWithoutRaw(t *testing.T) {
+	must := require.New(t)
 	e := acquisitionReplayEnv(t)
 	seedMessages(e, 1, 1000, "lost")
 	_, err := e.Syncer.Full(e.Context, testEmail)
-	require.NoError(t, err)
+	must.NoError(err)
 	_, err = e.Store.DB().Exec("DELETE FROM message_raw")
-	require.NoError(t, err)
+	must.NoError(err)
 	s := acquisitionReplaySource(t, e)
 	recordSyncRunItems(t, e, s.ID, store.SyncStatusCompleted, store.SyncRunItem{SourceMessageID: "lost", Phase: "ingest", Status: "error", ErrorKind: "ingest_error"})
 	acquisitionReplayReopen(t, e)
 	_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-	require.NoError(t, err)
+	must.NoError(err)
 	acquisitionReplayRaw(t, e, "lost")
 	var n int
-	require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM messages").Scan(&n))
-	require.Equal(t, 1, n)
+	must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM messages").Scan(&n))
+	must.Equal(1, n)
 }

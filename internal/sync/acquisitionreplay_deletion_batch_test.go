@@ -14,6 +14,8 @@ import (
 func TestAcquisitionReplayDeletionBatchesAtomic(t *testing.T) {
 	for _, mode := range []string{"provider", "gc"} {
 		t.Run(mode, func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			if mode == "gc" && e.Store.IsPostgreSQL() {
 				t.Skip("archive GC is SQLite-only")
@@ -26,27 +28,27 @@ func TestAcquisitionReplayDeletionBatchesAtomic(t *testing.T) {
 			sources := make([]*store.Source, 2)
 			for sourceIndex := range sources {
 				source, err := e.Store.GetOrCreateSource("gmail", fmt.Sprintf("batch-%d@example.test", sourceIndex))
-				require.NoError(t, err)
+				must.NoError(err)
 				sources[sourceIndex] = source
 				conversationID, err := e.Store.EnsureConversation(source.ID, "synthetic-batch", "Synthetic batch")
-				require.NoError(t, err)
+				must.NoError(err)
 				runID, err := e.Store.StartSync(source.ID, "incremental")
-				require.NoError(t, err)
+				must.NoError(err)
 				for i, id := range ids {
 					_, err = e.Store.PersistMessage(&store.MessagePersistData{
 						Message: &store.Message{SourceID: source.ID, SourceMessageID: id, ConversationID: conversationID, MessageType: "email"},
 						RawMIME: []byte("synthetic raw"),
 					})
-					require.NoError(t, err)
+					must.NoError(err)
 					if i%2 == 0 {
-						require.NoError(t, e.Store.RecordSyncRunItem(store.SyncRunItem{
+						must.NoError(e.Store.RecordSyncRunItem(store.SyncRunItem{
 							SyncRunID: runID, SourceMessageID: id, Phase: "fetch", Status: "error", ErrorKind: "fetch_error",
 						}))
 					}
 				}
 				// Local intent must remain authoritative after the provider deletion
 				// recorded by this batch.
-				require.NoError(t, e.Store.RecordSyncRunItem(store.SyncRunItem{
+				must.NoError(e.Store.RecordSyncRunItem(store.SyncRunItem{
 					SyncRunID: runID, SourceMessageID: ids[0], Phase: "fetch", Status: "skipped", ErrorKind: store.AcquisitionReplayLocalDeletion,
 				}))
 			}
@@ -54,7 +56,7 @@ func TestAcquisitionReplayDeletionBatchesAtomic(t *testing.T) {
 			deletionIDs := append(append([]string(nil), ids...), ids[0], ids[count-1], "untracked")
 			if mode == "gc" {
 				_, err := e.Store.DB().Exec("UPDATE messages SET deleted_from_source_at=CURRENT_TIMESTAMP")
-				require.NoError(t, err)
+				must.NoError(err)
 			}
 			execute := func() error {
 				if mode == "provider" {
@@ -69,49 +71,49 @@ func TestAcquisitionReplayDeletionBatchesAtomic(t *testing.T) {
 			}
 			acquisitionReplayInstallFault(t, e, "batch_disposition_fault", "sync_run_items",
 				"NEW.error_kind='acquisition_source_deleted' AND NEW.source_message_id='batch-1000'")
-			require.Error(t, execute())
+			must.Error(execute())
 			acquisitionReplayReopen(t, e)
 			var rows, raws, dispositions, tombstones int
-			require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM messages").Scan(&rows))
-			require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM message_raw").Scan(&raws))
-			require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM sync_run_items WHERE error_kind='acquisition_source_deleted'").Scan(&dispositions))
-			require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM messages WHERE deleted_from_source_at IS NOT NULL").Scan(&tombstones))
-			assert.Equal(t, count*2, rows)
-			assert.Equal(t, count*2, raws)
-			assert.Zero(t, dispositions, "earlier chunks roll back with the failing chunk")
+			must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM messages").Scan(&rows))
+			must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM message_raw").Scan(&raws))
+			must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM sync_run_items WHERE error_kind='acquisition_source_deleted'").Scan(&dispositions))
+			must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM messages WHERE deleted_from_source_at IS NOT NULL").Scan(&tombstones))
+			checks.Equal(count*2, rows)
+			checks.Equal(count*2, raws)
+			checks.Zero(dispositions, "earlier chunks roll back with the failing chunk")
 			if mode == "provider" {
-				assert.Zero(t, tombstones)
+				checks.Zero(tombstones)
 			} else {
-				assert.Equal(t, count*2, tombstones)
+				checks.Equal(count*2, tombstones)
 			}
 			acquisitionReplayDropFault(t, e, "batch_disposition_fault", []string{"sync_run_items"})
-			require.NoError(t, execute())
+			must.NoError(execute())
 			// Repeated observations do not duplicate dispositions, including repeated
 			// IDs split across the SQL lookup chunks.
-			require.NoError(t, execute())
+			must.NoError(execute())
 			acquisitionReplayReopen(t, e)
 			for sourceIndex, source := range sources {
-				require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind(`SELECT count(*) FROM sync_run_items item
+				must.NoError(e.Store.DB().QueryRow(e.Store.Rebind(`SELECT count(*) FROM sync_run_items item
      JOIN sync_runs run ON run.id=item.sync_run_id WHERE run.source_id=? AND item.error_kind='acquisition_source_deleted'`), source.ID).Scan(&dispositions))
 				if sourceIndex == 0 || mode == "gc" {
-					assert.Equal(t, (count+1)/2, dispositions)
+					checks.Equal((count+1)/2, dispositions)
 				} else {
-					assert.Zero(t, dispositions)
+					checks.Zero(dispositions)
 				}
 				pending, err := e.Store.PendingAcquisitionReplayIDs(source.ID)
-				require.NoError(t, err)
-				assert.NotContains(t, pending, ids[0], "local intent remains terminal")
+				must.NoError(err)
+				checks.NotContains(pending, ids[0], "local intent remains terminal")
 				if sourceIndex == 0 || mode == "gc" {
-					assert.Empty(t, pending)
+					checks.Empty(pending)
 				} else {
-					assert.Len(t, pending, (count-1)/2)
+					checks.Len(pending, (count-1)/2)
 				}
 			}
-			require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM messages").Scan(&rows))
+			must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM messages").Scan(&rows))
 			if mode == "gc" {
-				assert.Zero(t, rows)
+				checks.Zero(rows)
 			} else {
-				assert.Equal(t, count*2, rows)
+				checks.Equal(count*2, rows)
 			}
 		})
 	}
