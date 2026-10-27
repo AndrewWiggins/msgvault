@@ -2366,6 +2366,17 @@ func (s *Store) persistMessageWith(
 	}
 	q := boundQuerier{ctx: ctx, q: tx}
 	message := data.Message
+	if s.syncGeneration != nil {
+		// Scoped acquisition holds the shared identity lock. A purge holds it
+		// exclusively until both its policy and physical removal commit.
+		deleted, err := acquisitionLocallyDeletedWith(q, message.SourceID, message.SourceMessageID)
+		if err != nil {
+			return 0, err
+		}
+		if deleted {
+			return 0, ErrAcquisitionLocallyDeleted
+		}
+	}
 	if data.Conversation != nil {
 		conversationID, err := ensureConversationWithTypePolicy(
 			q, s.dialect, data.Message.SourceID,
@@ -3590,7 +3601,7 @@ func (s *Store) ReconcileSourceMessageSnapshot(
 				return fmt.Errorf("reconcile acquisition inventory: %w", err)
 			}
 			for id, state := range states {
-				if _, found := present[id]; found || state == "terminal" {
+				if _, found := present[id]; found || state == "terminal" || state == "local-deleted" {
 					continue
 				}
 				if err := s.appendAcquisitionReplayDispositionWith(

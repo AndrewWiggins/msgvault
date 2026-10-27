@@ -47,6 +47,10 @@ var ErrSyncAlreadyActive = errors.New("sync already active")
 // generation that is no longer running or current for its source.
 var ErrSyncRunSuperseded = errors.New("sync run superseded")
 
+// ErrAcquisitionLocallyDeleted prevents a stale Gmail fetch from recreating an
+// occurrence intentionally destroyed locally. The native ID is never reused.
+var ErrAcquisitionLocallyDeleted = errors.New("acquisition intentionally deleted locally")
+
 type syncGeneration struct {
 	sourceID int64
 	runID    int64
@@ -958,12 +962,46 @@ func (s *Store) RecordSyncRunItem(item SyncRunItem) error {
 
 // RecordSyncRunItemContext honors cancellation during RecordSyncRunItem.
 func (s *Store) RecordSyncRunItemContext(ctx context.Context, item SyncRunItem) error {
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+	if item.Phase == "fetch" && item.Status == SyncRunItemStatusSkipped && item.ErrorKind == AcquisitionReplayResolved {
+		var sourceID int64
+		if err := s.db.QueryRowContext(ctx, `SELECT source_id FROM sync_runs WHERE id = ?`, item.SyncRunID).Scan(&sourceID); err != nil {
+			return fmt.Errorf("read acquisition resolution source: %w", err)
+		}
+		if err := s.requireSyncSource(sourceID); err != nil {
+			return err
+		}
+		// The shared identity/source locks precede the generation fence. Purges
+		// take the exclusive identity lock before journaling or deleting; message
+		// persistence already takes these shared locks. The RAW check and append
+		// therefore cannot straddle a committed purge, even in another process.
+		return s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{sourceID}}, func(tx *loggedTx) error {
+			q := boundQuerier{ctx: ctx, q: tx}
+			deleted, err := acquisitionLocallyDeletedWith(q, sourceID, item.SourceMessageID)
+			if err != nil || deleted {
+				return err
+			}
+			var withRaw bool
+			if err := q.QueryRow(`SELECT EXISTS (
+				SELECT 1 FROM messages m JOIN message_raw mr ON mr.message_id=m.id
+				WHERE m.source_id=? AND m.source_message_id=?)`, sourceID, item.SourceMessageID).Scan(&withRaw); err != nil {
+				return fmt.Errorf("check acquisition resolution RAW: %w", err)
+			}
+			if !withRaw {
+				return nil
+			}
+			return recordSyncRunItemWith(q, s.dialect, item)
+		})
+	}
+	return recordSyncRunItemWith(boundQuerier{ctx: ctx, q: s.db}, s.dialect, item)
+}
+
+func recordSyncRunItemWith(q querier, dialect Dialect, item SyncRunItem) error {
+	_, err := q.Exec(fmt.Sprintf(`
 		INSERT INTO sync_run_items (
 			sync_run_id, source_message_id, phase, status,
 			error_kind, error_message, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, %s)
-	`, s.dialect.Now()),
+	`, dialect.Now()),
 		item.SyncRunID, item.SourceMessageID, item.Phase, item.Status,
 		item.ErrorKind, item.ErrorMessage,
 	)
@@ -971,6 +1009,19 @@ func (s *Store) RecordSyncRunItemContext(ctx context.Context, item SyncRunItem) 
 		return fmt.Errorf("insert sync_run_item: %w", err)
 	}
 	return nil
+}
+
+func acquisitionLocallyDeletedWith(q querier, sourceID int64, nativeID string) (bool, error) {
+	var deleted bool
+	err := q.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM sync_run_items item JOIN sync_runs run ON run.id=item.sync_run_id
+		WHERE run.source_id=? AND item.source_message_id=? AND item.phase='fetch'
+		  AND item.status='skipped' AND item.error_kind='acquisition_local_deletion'
+	)`, sourceID, nativeID).Scan(&deleted)
+	if err != nil {
+		return false, fmt.Errorf("read intentional acquisition deletion: %w", err)
+	}
+	return deleted, nil
 }
 
 // recordAcquisitionReplayDispositionWith appends an explicit lifecycle event
@@ -1101,9 +1152,18 @@ func (s *Store) acquisitionReplayStatesWith(ctx context.Context, q chunkQuerier,
 		if err := rows.Scan(&messageID, &status, &phase, &errorKind); err != nil {
 			return nil, err
 		}
+		// Local destruction is an explicit policy for an immutable Gmail native
+		// identity. Later stale fetch errors, resolutions or remote observations
+		// remain diagnostics; none can revoke that policy. Remote deletion alone
+		// remains reopenable by subsequent History acquisition events.
+		if states[messageID] == "local-deleted" {
+			continue
+		}
 		if status == SyncRunItemStatusSkipped && phase == "fetch" {
 			switch errorKind {
-			case "message_gone", AcquisitionReplayLocalDeletion, AcquisitionReplaySourceDeleted:
+			case AcquisitionReplayLocalDeletion:
+				states[messageID] = "local-deleted"
+			case "message_gone", AcquisitionReplaySourceDeleted:
 				states[messageID] = "terminal"
 			case AcquisitionReplayResolved:
 				states[messageID] = "acquired"

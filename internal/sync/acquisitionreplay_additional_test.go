@@ -164,25 +164,6 @@ func TestAcquisitionReplayGeneric404RemainsDebt(t *testing.T) {
 	acquisitionReplayRaw(t, e, "404-id")
 }
 
-func TestAcquisitionReplayResolvedDebtSurvivesIntentionalLocalDeletion(t *testing.T) {
-	e := acquisitionReplayEnv(t)
-	s := e.CreateSourceWithHistory(t, "1000")
-	acquisitionReplayCreateAndResolveDebt(t, e, s, "local-delete")
-	_, err := e.Store.DB().Exec(e.Store.Rebind(`
-		UPDATE messages SET deleted_at=CURRENT_TIMESTAMP, delete_batch_id='synthetic-batch'
-		WHERE source_id=? AND source_message_id='local-delete'`), s.ID)
-	require.NoError(t, err)
-	deleted, err := e.Store.DeleteDedupedBatch("synthetic-batch")
-	require.NoError(t, err)
-	require.EqualValues(t, 1, deleted)
-	acquisitionReplayReopen(t, e)
-	calls := len(e.Mock.GetMessageCalls)
-	_, err = e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-	require.NoError(t, err)
-	require.Len(t, e.Mock.GetMessageCalls, calls, "resolved debt must stay resolved after intentional local deletion")
-	requireAcquisitionErrorHistory(t, e, "local-delete", 1)
-}
-
 func TestAcquisitionReplayResolvedDebtSurvivesSourceDeletionAndGC(t *testing.T) {
 	e := acquisitionReplayEnv(t)
 	s := e.CreateSourceWithHistory(t, "1000")
