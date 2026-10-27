@@ -7,6 +7,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/gmail"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
+	"net/url"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -14,9 +17,23 @@ import (
 func acquisitionReplayEnv(t *testing.T) *TestEnv {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "durable.db"))
-	require.NoError(t, err)
-	require.NoError(t, st.InitSchema())
+	var st *store.Store
+	if store.IsPostgresURL(os.Getenv("MSGVAULT_TEST_DB")) {
+		st = testutil.NewTestStore(t)
+		var database, schema string
+		require.NoError(t, st.DB().QueryRow("SELECT current_database(), current_schema()").Scan(&database, &schema))
+		u, err := url.Parse(os.Getenv("MSGVAULT_TEST_DB"))
+		require.NoError(t, err)
+		u.Path = "/" + database
+		q := u.Query()
+		q.Set("search_path", schema)
+		u.RawQuery = q.Encode()
+		dir = u.String()
+	} else {
+		// Keep the durable filename used by reopen helpers, using the existing
+		// initialized SQLite fixture rather than replaying schema DDL per test.
+		st = testutil.NewSQLiteTestStoreAt(t, filepath.Join(dir, "durable.db"))
+	}
 	mock := gmail.NewMockAPI()
 	mock.Profile = &gmail.Profile{EmailAddress: testEmail, HistoryID: 1000}
 	e := &TestEnv{Store: st, Mock: mock, Syncer: New(mock, st, nil), TmpDir: dir, Context: context.Background()}
@@ -27,7 +44,11 @@ func acquisitionReplayReopen(t *testing.T, e *TestEnv) {
 	t.Helper()
 	api := e.Syncer.client
 	require.NoError(t, e.Store.Close())
-	st, err := store.Open(filepath.Join(e.TmpDir, "durable.db"))
+	path := filepath.Join(e.TmpDir, "durable.db")
+	if store.IsPostgresURL(e.TmpDir) {
+		path = e.TmpDir
+	}
+	st, err := store.Open(path)
 	require.NoError(t, err)
 	e.Store = st
 	e.Syncer = New(api, st, nil)
@@ -61,19 +82,21 @@ func acquisitionReplayRaw(t *testing.T, e *TestEnv, id string) {
 func acquisitionReplayTrigger(t *testing.T, e *TestEnv, table string) {
 	t.Helper()
 	require.Contains(t, []string{"messages", "message_raw"}, table)
-	_, err := e.Store.DB().Exec("CREATE TRIGGER acquisitionReplay_fail BEFORE INSERT ON " + table + " BEGIN SELECT RAISE(ABORT, 'AcquisitionReplay synthetic SQL failure'); END")
-	require.NoError(t, err)
+	acquisitionReplayInstallFault(t, e, "acquisitionReplay_fail", table, "")
 }
 func acquisitionReplayDrop(t *testing.T, e *TestEnv) {
 	t.Helper()
-	_, err := e.Store.DB().Exec("DROP TRIGGER acquisitionReplay_fail")
-	require.NoError(t, err)
+	acquisitionReplayDropFault(t, e, "acquisitionReplay_fail", []string{"messages", "message_raw"})
+}
+func acquisitionReplayDropIfPresent(t *testing.T, e *TestEnv) {
+	t.Helper()
+	acquisitionReplayDrop(t, e)
 }
 func acquisitionReplayRunRecord(t *testing.T, e *TestEnv, runID int64, wantPhase string) {
 	t.Helper()
 	var status, cursor string
 	var errors int
-	require.NoError(t, e.Store.DB().QueryRow("SELECT status,cursor_after,errors_count FROM sync_runs WHERE id=?", runID).Scan(&status, &cursor, &errors))
+	require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind("SELECT status,cursor_after,errors_count FROM sync_runs WHERE id=?"), runID).Scan(&status, &cursor, &errors))
 	require.Equal(t, "completed", status)
 	require.Equal(t, 1, errors)
 	items, err := e.Store.ListSyncRunItems(runID, store.SyncRunItemStatusError, 100)
@@ -131,8 +154,7 @@ func TestAcquisitionReplayScenario2(t *testing.T) {
 				if failure != "fetch" {
 					e.Mock.MessagePages = [][]string{{"good1"}, {"lost"}, {"good2"}}
 					api := &replayControlAPI{MockAPI: e.Mock, beforeBatch: func(_ int, ids []string) {
-						_, err := e.Store.DB().Exec("DROP TRIGGER IF EXISTS acquisitionReplay_fail")
-						require.NoError(t, err)
+						acquisitionReplayDropIfPresent(t, e)
 						if len(ids) == 1 && ids[0] == "lost" {
 							acquisitionReplayTrigger(t, e, failure)
 						}
@@ -153,8 +175,7 @@ func TestAcquisitionReplayScenario2(t *testing.T) {
 				require.GreaterOrEqual(t, first.Errors, int64(1))
 				require.Equal(t, int64(2), first.MessagesAdded)
 				if failure != "fetch" {
-					_, err = e.Store.DB().Exec("DROP TRIGGER IF EXISTS acquisitionReplay_fail")
-					require.NoError(t, err)
+					acquisitionReplayDropIfPresent(t, e)
 				}
 				// Remove the fault-injection wrapper as well as its trigger;
 				// the final positive-control full must not reinstall the fault.

@@ -734,6 +734,44 @@ func (s *Store) UndoDedup(batchID string) (int64, error) {
 	return result.RowsAffected()
 }
 
+// recordDedupAcquisitionDeletions records intent before the selected occurrence
+// identities and their RAW are destroyed. Both purge entry points use the same
+// statement inside their deletion transaction.
+func (s *Store) recordDedupAcquisitionDeletions(ctx context.Context, tx *loggedTx, batchID *string) error {
+	scope := "messages.delete_batch_id IS NOT NULL"
+	args := []any{AcquisitionReplayLocalDeletion, "Gmail message explicitly removed in local dedup cleanup"}
+	if batchID != nil {
+		scope = "messages.delete_batch_id = ?"
+		args = append(args, *batchID)
+	}
+	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+				INSERT INTO sync_run_items (
+					sync_run_id, source_message_id, phase, status, error_kind, error_message, created_at
+				)
+				SELECT (
+					SELECT id FROM sync_runs WHERE source_id = messages.source_id ORDER BY id DESC LIMIT 1
+				), messages.source_message_id, 'fetch', 'skipped', ?, ?, %s
+				FROM messages
+				JOIN sources src ON src.id = messages.source_id AND src.source_type = 'gmail'
+				WHERE messages.deleted_at IS NOT NULL AND %s
+				  AND EXISTS (SELECT 1 FROM sync_runs run WHERE run.source_id = messages.source_id)
+				  AND EXISTS (
+					SELECT 1 FROM sync_run_items item
+					JOIN sync_runs prior_run ON prior_run.id = item.sync_run_id
+					WHERE prior_run.source_id = messages.source_id
+					  AND item.source_message_id = messages.source_message_id
+					  AND item.phase IN ('fetch', 'ingest')
+					  AND item.error_kind IN ('fetch_error', 'batch_fetch_error', 'ingest_error',
+					      'gmail_not_found', 'message_gone', 'acquisition_resolved',
+					      'acquisition_local_deletion', 'acquisition_source_deleted')
+				  )
+			`, s.dialect.Now(), scope), args...)
+	if err != nil {
+		return fmt.Errorf("record Gmail acquisition resolution before dedup deletion: %w", err)
+	}
+	return nil
+}
+
 // DeleteDedupedBatch permanently deletes all hidden rows associated with a
 // dedup batch. Only deletes rows where deleted_at IS NOT NULL AND
 // delete_batch_id = batchID. Returns the number of rows deleted.
@@ -776,30 +814,8 @@ func (s *Store) DeleteDedupedBatchesContext(
 	var deleted int64
 	err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
 		for _, batchID := range batchIDs {
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-				INSERT INTO sync_run_items (
-					sync_run_id, source_message_id, phase, status, error_kind, error_message, created_at
-				)
-				SELECT (
-					SELECT id FROM sync_runs WHERE source_id = messages.source_id ORDER BY id DESC LIMIT 1
-				), messages.source_message_id, 'fetch', 'skipped', ?, ?, %s
-				FROM messages
-				JOIN sources src ON src.id = messages.source_id AND src.source_type = 'gmail'
-				WHERE messages.delete_batch_id = ? AND messages.deleted_at IS NOT NULL
-				  AND EXISTS (SELECT 1 FROM sync_runs run WHERE run.source_id = messages.source_id)
-				  AND EXISTS (
-					SELECT 1 FROM sync_run_items item
-					JOIN sync_runs prior_run ON prior_run.id = item.sync_run_id
-					WHERE prior_run.source_id = messages.source_id
-					  AND item.source_message_id = messages.source_message_id
-					  AND item.phase IN ('fetch', 'ingest')
-					  AND item.error_kind IN ('fetch_error', 'batch_fetch_error', 'ingest_error',
-					      'gmail_not_found', 'message_gone', 'acquisition_resolved',
-					      'acquisition_local_deletion', 'acquisition_source_deleted')
-				  )
-			`, s.dialect.Now()), AcquisitionReplayLocalDeletion,
-				"Gmail message explicitly removed in local dedup cleanup", batchID); err != nil {
-				return fmt.Errorf("record Gmail acquisition resolution before dedup deletion %q: %w", batchID, err)
+			if err := s.recordDedupAcquisitionDeletions(ctx, tx, &batchID); err != nil {
+				return err
 			}
 			result, err := tx.ExecContext(ctx, `
 				DELETE FROM messages
@@ -908,6 +924,10 @@ func (s *Store) DeleteAllDedupedContext(
 			WHERE deleted_at IS NOT NULL AND delete_batch_id IS NOT NULL
 		`).Scan(&distinctBatches); err != nil {
 			return fmt.Errorf("delete all dedup-hidden: count batches: %w", err)
+		}
+
+		if err := s.recordDedupAcquisitionDeletions(ctx, tx, nil); err != nil {
+			return err
 		}
 
 		result, err := tx.ExecContext(ctx, `

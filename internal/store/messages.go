@@ -3532,7 +3532,10 @@ func (s *Store) MarkMessagesDeletedBatch(sourceID int64, sourceMessageIDs []stri
 }
 
 // ReconcileSourceMessageSnapshot tombstones locally live messages that are
-// absent from one complete provider snapshot. The sync-scoped Store fences the
+// absent from one complete provider snapshot, and acknowledges tracked Gmail
+// acquisitions absent from that inventory even without an archived row. Callers
+// must supply every page of an unfiltered, unlimited source inventory.
+// The sync-scoped Store fences the
 // current generation before reading or writing, and the transaction ensures an
 // incomplete reconciliation cannot publish partial tombstones.
 func (s *Store) ReconcileSourceMessageSnapshot(
@@ -3577,6 +3580,28 @@ func (s *Store) ReconcileSourceMessageSnapshot(
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("reconcile source message snapshot: list live messages: %w", err)
 		}
+		var sourceType string
+		if err := tx.QueryRowContext(ctx, "SELECT source_type FROM sources WHERE id=?", sourceID).Scan(&sourceType); err != nil {
+			return err
+		}
+		if sourceType == "gmail" {
+			states, err := s.acquisitionReplayStatesWith(ctx, tx, sourceID)
+			if err != nil {
+				return fmt.Errorf("reconcile acquisition inventory: %w", err)
+			}
+			for id, state := range states {
+				if _, found := present[id]; found || state == "terminal" {
+					continue
+				}
+				if err := s.appendAcquisitionReplayDispositionWith(
+					boundQuerier{ctx: ctx, q: tx}, sourceID, id, AcquisitionReplaySourceDeleted,
+					"Gmail message absent from complete source-presence inventory",
+				); err != nil {
+					return fmt.Errorf("reconcile acquisition inventory: %w", err)
+				}
+			}
+		}
+
 		if len(missing) == 0 {
 			return nil
 		}

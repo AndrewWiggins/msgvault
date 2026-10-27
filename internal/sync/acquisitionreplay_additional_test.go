@@ -79,8 +79,8 @@ func TestAcquisitionReplayJournalFailureDoesNotPublishProgress(t *testing.T) {
 			e.Mock.MessagePages = [][]string{{"lost"}, {"other"}}
 			e.Mock.GetMessageError["lost"] = errors.New("synthetic download error")
 			e.SetHistory(1001, historyAdded("lost"))
-			_, err := e.Store.DB().Exec("CREATE TRIGGER fail_journal BEFORE INSERT ON sync_run_items BEGIN SELECT RAISE(ABORT,'synthetic journal error'); END")
-			require.NoError(t, err)
+			acquisitionReplayInstallFault(t, e, "fail_journal", "sync_run_items", "")
+			var err error
 			if kind == "incremental" {
 				_, err = e.Syncer.Incremental(e.Context, s)
 			} else {
@@ -91,8 +91,7 @@ func TestAcquisitionReplayJournalFailureDoesNotPublishProgress(t *testing.T) {
 			var token string
 			require.NoError(t, e.Store.DB().QueryRow("SELECT COALESCE(cursor_before,'') FROM sync_runs ORDER BY id DESC LIMIT 1").Scan(&token))
 			require.Empty(t, token)
-			_, err = e.Store.DB().Exec("DROP TRIGGER fail_journal")
-			require.NoError(t, err)
+			acquisitionReplayDropFault(t, e, "fail_journal", []string{"sync_run_items"})
 			delete(e.Mock.GetMessageError, "lost")
 			acquisitionReplayReopen(t, e)
 			if kind == "incremental" {
@@ -113,7 +112,7 @@ func TestAcquisitionReplayDebtLegacyGoneAndSourceIsolation(t *testing.T) {
 	recordSyncRunItems(t, e, s.ID, store.SyncStatusFailed,
 		store.SyncRunItem{SourceMessageID: "lost", Phase: "ingest", Status: "error", ErrorKind: "ingest_error"},
 		store.SyncRunItem{SourceMessageID: "gone", Phase: "fetch", Status: "error", ErrorKind: "fetch_error"})
-	_, err := e.Store.DB().Exec("UPDATE sync_runs SET sync_type='' WHERE source_id=?", s.ID)
+	_, err := e.Store.DB().Exec(e.Store.Rebind("UPDATE sync_runs SET sync_type='' WHERE source_id=?"), s.ID)
 	require.NoError(t, err)
 	other, err := e.Store.GetOrCreateSource("gmail", "other@example.com")
 	require.NoError(t, err)

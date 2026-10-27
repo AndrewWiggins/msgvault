@@ -1598,7 +1598,7 @@ func TestAcquisitionReplayLegacyGmailNotFoundRemainsDebt(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
-	env := newTestEnv(t)
+	env := acquisitionReplayEnv(t)
 	const messageID = "legacy-gmail-not-found"
 	source := env.CreateSourceWithHistory(t, "1000")
 	recordSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{
