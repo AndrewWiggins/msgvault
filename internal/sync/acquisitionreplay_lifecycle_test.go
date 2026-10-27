@@ -149,8 +149,8 @@ func (a *acquisitionInventoryAPI) ListCompleteMessageSnapshot(ctx context.Contex
 		}
 		return nil, errors.New("synthetic inventory page error")
 	}
-	// Spam/Trash occur in the authoritative inventory although the pre-B
-	// acquisition list can omit them. Presence alone must keep their debt.
+	// The presence inventory includes Spam and Trash even when the acquisition
+	// listing omits them. Presence alone must keep their debt.
 	if a.mode == "special" {
 		return &gmail.MessageListResponse{Messages: []gmail.MessageID{{ID: "lost"}, {ID: "present"}}}, nil
 	}

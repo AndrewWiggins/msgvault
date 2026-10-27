@@ -3466,7 +3466,10 @@ func (s *Store) ClearMessageRepliesContext(ctx context.Context, sourceID int64, 
 	})
 }
 
-// MarkMessageDeleted marks a message as deleted from the source.
+// MarkMessageDeleted marks a message as deleted from the source. For a tracked
+// Gmail acquisition, it records acquisition_source_deleted in the same
+// transaction, even when no message row exists. A journal failure rolls back
+// the tombstone; untracked IDs and other source types add no disposition.
 func (s *Store) MarkMessageDeleted(sourceID int64, sourceMessageID string) error {
 	return s.MarkMessageDeletedContext(context.Background(), sourceID, sourceMessageID)
 }
@@ -3517,7 +3520,10 @@ func (s *Store) ClearMessageDeletedFromSourceContext(ctx context.Context, source
 	return s.withTxContext(ctx, func(tx *loggedTx) error { return write(boundQuerier{ctx: ctx, q: tx}) })
 }
 
-// MarkMessagesDeletedBatch marks multiple messages as deleted from the source in a single transaction.
+// MarkMessagesDeletedBatch atomically records source tombstones and the Gmail
+// acquisition dispositions described by MarkMessageDeleted. An error rolls back
+// the entire batch. Gmail callers must retain the prior History cursor on failure:
+// delete_error diagnostics alone cannot replay the rolled-back deletions.
 func (s *Store) MarkMessagesDeletedBatch(sourceID int64, sourceMessageIDs []string) error {
 	if len(sourceMessageIDs) == 0 {
 		return nil
@@ -3546,9 +3552,8 @@ func (s *Store) MarkMessagesDeletedBatch(sourceID int64, sourceMessageIDs []stri
 // absent from one complete provider snapshot, and acknowledges tracked Gmail
 // acquisitions absent from that inventory even without an archived row. Callers
 // must supply every page of an unfiltered, unlimited source inventory.
-// The sync-scoped Store fences the
-// current generation before reading or writing, and the transaction ensures an
-// incomplete reconciliation cannot publish partial tombstones.
+// The sync-scoped Store fences the current generation before any reads or writes.
+// Reconciliation commits its tombstones and acquisition dispositions together.
 func (s *Store) ReconcileSourceMessageSnapshot(
 	ctx context.Context, sourceID int64, present map[string]struct{},
 ) (int64, error) {

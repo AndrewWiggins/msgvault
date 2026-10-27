@@ -103,6 +103,8 @@ func equalGCPlans(a, b GCPlan) bool {
 // ExecuteGCContext permanently removes source-deleted rows only. The expected
 // plan is rechecked inside the deletion transaction so a confirmation cannot
 // authorize a population that changed while the operator was reading it.
+// Tracked Gmail acquisitions retain acquisition_source_deleted in that same
+// transaction, so removing RAW cannot reopen debt as accidental content loss.
 func (s *Store) ExecuteGCContext(
 	ctx context.Context,
 	expected GCPlan,
