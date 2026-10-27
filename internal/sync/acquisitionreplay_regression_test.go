@@ -77,7 +77,7 @@ func acquisitionReplayRaw(t *testing.T, e *TestEnv, id string) {
 	require.Contains(t, m, id)
 	raw, err := e.Store.GetMessageRaw(m[id])
 	require.NoError(t, err)
-	require.Equal(t, []byte(testMIME()), raw)
+	require.Equal(t, testMIME(), raw)
 }
 func acquisitionReplayTrigger(t *testing.T, e *TestEnv, table string) {
 	t.Helper()
@@ -108,34 +108,35 @@ func acquisitionReplayRunRecord(t *testing.T, e *TestEnv, runID int64, wantPhase
 func TestAcquisitionReplayScenario1(t *testing.T) {
 	for _, table := range []string{"messages", "message_raw"} {
 		t.Run(table, func(t *testing.T) {
+			must := require.New(t)
 			e := acquisitionReplayEnv(t)
 			s := e.CreateSourceWithHistory(t, "1000")
 			e.Mock.AddMessage("lost", testMIME(), []string{"INBOX"})
 			e.SetHistory(1001, historyAdded("lost"))
 			acquisitionReplayTrigger(t, e, table)
 			first, err := e.Syncer.Incremental(e.Context, s)
-			require.NoError(t, err)
-			require.Equal(t, int64(1), first.Errors)
-			require.Equal(t, int64(0), first.MessagesAdded)
-			require.Equal(t, []string{"lost"}, e.Mock.GetMessageCalls)
+			must.NoError(err)
+			must.Equal(int64(1), first.Errors)
+			must.Equal(int64(0), first.MessagesAdded)
+			must.Equal([]string{"lost"}, e.Mock.GetMessageCalls)
 			acquisitionReplayAbsent(t, e, "lost")
 			acquisitionReplayDrop(t, e)
 			acquisitionReplayReopen(t, e)
-			require.Equal(t, "1001", acquisitionReplaySource(t, e).SyncCursor.String)
+			must.Equal("1001", acquisitionReplaySource(t, e).SyncCursor.String)
 			acquisitionReplayRunRecord(t, e, first.SyncRunID, "ingest")
 			e.SetHistory(1001)
-			for i := 0; i < 2; i++ {
+			for i := range 2 {
 				next, err := e.Syncer.Incremental(e.Context, acquisitionReplaySource(t, e))
-				require.NoError(t, err)
-				require.Zero(t, next.Errors)
-				require.Equal(t, int64(1-i), next.MessagesAdded)
+				must.NoError(err)
+				must.Zero(next.Errors)
+				must.Equal(int64(1-i), next.MessagesAdded)
 				acquisitionReplayReopen(t, e)
 				acquisitionReplayRaw(t, e, "lost")
 			}
-			require.Equal(t, []string{"lost", "lost"}, e.Mock.GetMessageCalls)
+			must.Equal([]string{"lost", "lost"}, e.Mock.GetMessageCalls)
 			positive, err := e.Syncer.Full(e.Context, testEmail)
-			require.NoError(t, err)
-			require.Zero(t, positive.MessagesAdded)
+			must.NoError(err)
+			must.Zero(positive.MessagesAdded)
 			acquisitionReplayRaw(t, e, "lost")
 		})
 	}
@@ -144,6 +145,7 @@ func TestAcquisitionReplayScenario2(t *testing.T) {
 	for _, recovery := range []bool{false, true} {
 		for _, failure := range []string{"fetch", "messages", "message_raw"} {
 			t.Run(fmt.Sprintf("expired=%t/%s", recovery, failure), func(t *testing.T) {
+				must := require.New(t)
 				e := acquisitionReplayEnv(t)
 				seedMessages(e, 3, 1001, "good1", "lost", "good2")
 				// Target only the missing message: use a batch hook to install a SQL trigger
@@ -171,9 +173,9 @@ func TestAcquisitionReplayScenario2(t *testing.T) {
 				} else {
 					first, err = e.Syncer.Full(e.Context, testEmail)
 				}
-				require.NoError(t, err)
-				require.GreaterOrEqual(t, first.Errors, int64(1))
-				require.Equal(t, int64(2), first.MessagesAdded)
+				must.NoError(err)
+				must.GreaterOrEqual(first.Errors, int64(1))
+				must.Equal(int64(2), first.MessagesAdded)
 				if failure != "fetch" {
 					acquisitionReplayDropIfPresent(t, e)
 				}
@@ -185,9 +187,9 @@ func TestAcquisitionReplayScenario2(t *testing.T) {
 				e.SetHistory(1001)
 				acquisitionReplayReopen(t, e)
 				s := acquisitionReplaySource(t, e)
-				require.Equal(t, "1001", s.SyncCursor.String)
+				must.Equal("1001", s.SyncCursor.String)
 				run, err := e.Store.GetLastSuccessfulSyncByType(s.ID, "full")
-				require.NoError(t, err)
+				must.NoError(err)
 				phase := "ingest"
 				if failure == "fetch" {
 					phase = "fetch"
@@ -195,16 +197,16 @@ func TestAcquisitionReplayScenario2(t *testing.T) {
 				acquisitionReplayRunRecord(t, e, run.ID, phase)
 				acquisitionReplayAbsent(t, e, "lost")
 				before := len(e.Mock.GetMessageCalls)
-				for i := 0; i < 2; i++ {
+				for i := range 2 {
 					next, err := e.Syncer.IncrementalWithHistoryRecovery(e.Context, acquisitionReplaySource(t, e), nil)
-					require.NoError(t, err)
-					require.Equal(t, int64(1-i), next.MessagesAdded)
+					must.NoError(err)
+					must.Equal(int64(1-i), next.MessagesAdded)
 					acquisitionReplayReopen(t, e)
 					acquisitionReplayRaw(t, e, "lost")
 				}
-				require.Len(t, e.Mock.GetMessageCalls, before+1)
+				must.Len(e.Mock.GetMessageCalls, before+1)
 				_, err = e.Syncer.Full(e.Context, testEmail)
-				require.NoError(t, err)
+				must.NoError(err)
 				acquisitionReplayRaw(t, e, "lost")
 				acquisitionReplayRaw(t, e, "good1")
 				acquisitionReplayRaw(t, e, "good2")

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	stdsync "sync"
 	"sync/atomic"
@@ -26,6 +27,7 @@ import (
 // SQL logging uses the process-wide slog handler.
 type acquisitionReplayBarrier struct {
 	slog.Handler
+
 	match   func(string) bool
 	armed   atomic.Bool
 	reached chan struct{}
@@ -46,7 +48,9 @@ func (b *acquisitionReplayBarrier) Handle(ctx context.Context, r slog.Record) er
 		<-b.release
 	}
 	if b.Handler.Enabled(ctx, r.Level) {
-		return b.Handler.Handle(ctx, r)
+		if err := b.Handler.Handle(ctx, r); err != nil {
+			return fmt.Errorf("forward acquisition replay log: %w", err)
+		}
 	}
 	return nil
 }
@@ -89,13 +93,15 @@ func acquisitionReplayDatabase(e *TestEnv) string {
 // Invoked only by the parent test, with its freshly created synthetic DB.
 // The child inherits the parent's network namespace and seccomp restrictions.
 func TestAcquisitionReplayCleanupProcess(t *testing.T) {
+	must := require.New(t)
+	checks := assert.New(t)
 	path := os.Getenv("MSGVAULT_TEST_ACQUISITION_PURGE")
 	if path == "" {
 		t.Skip("subprocess helper")
 	}
 	st, err := store.Open(path)
-	require.NoError(t, err)
-	defer st.Close()
+	must.NoError(err)
+	t.Cleanup(func() { assert.NoError(t, st.Close()) })
 	busy := os.Getenv("MSGVAULT_TEST_ACQUISITION_PURGE_BUSY") == "1"
 	if busy {
 		st.DB().SetMaxOpenConns(1)
@@ -104,7 +110,7 @@ func TestAcquisitionReplayCleanupProcess(t *testing.T) {
 			statement = "SET lock_timeout='250ms'"
 		}
 		_, err := st.DB().Exec(statement)
-		require.NoError(t, err)
+		must.NoError(err)
 	}
 	var n int64
 	if os.Getenv("MSGVAULT_TEST_ACQUISITION_UNDO") == "1" {
@@ -113,20 +119,22 @@ func TestAcquisitionReplayCleanupProcess(t *testing.T) {
 		n, _, err = st.DeleteAllDedupedContext(t.Context())
 	}
 	if busy {
-		require.Error(t, err, "a concurrent resolution still owns the transaction lock")
-		assert.Contains(t, err.Error(), "lock")
-		assert.Zero(t, n)
+		must.Error(err, "a concurrent resolution still owns the transaction lock")
+		checks.Contains(err.Error(), "lock")
+		checks.Zero(n)
 		return
 	}
-	require.NoError(t, err)
-	require.EqualValues(t, 1, n)
+	must.NoError(err)
+	must.EqualValues(1, n)
 }
 
 func acquisitionReplayProcessPurge(t *testing.T, e *TestEnv) {
+	t.Helper()
 	acquisitionReplayProcessPurgeWithLock(t, e, false)
 }
 
 func acquisitionReplayProcessPurgeWithLock(t *testing.T, e *TestEnv, busy bool) {
+	t.Helper()
 	acquisitionReplayProcessMutation(t, e, busy, false)
 }
 
@@ -147,6 +155,8 @@ func acquisitionReplayProcessMutation(t *testing.T, e *TestEnv, busy, undo bool)
 }
 
 func TestAcquisitionReplayPurgeKeepsJournaledPopulationHidden(t *testing.T) {
+	must := require.New(t)
+	checks := assert.New(t)
 	e := acquisitionReplayEnv(t)
 	s := e.CreateSourceWithHistory(t, "1000")
 	acquisitionReplayCreateAndResolveDebt(t, e, s, "race-id")
@@ -157,17 +167,17 @@ func TestAcquisitionReplayPurgeKeepsJournaledPopulationHidden(t *testing.T) {
 	wait()
 	acquisitionReplayProcessMutation(t, e, true, true)
 	resume()
-	require.NoError(t, <-done)
+	must.NoError(<-done)
 	acquisitionReplayDropFault(t, e, "replay_barrier", []string{"sync_run_items"})
 	acquisitionReplayReopen(t, e)
 	acquisitionReplayAbsent(t, e, "race-id")
-	assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
+	checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
 	n, err := e.Store.UndoDedup("synthetic-batch")
-	require.NoError(t, err)
-	assert.Zero(t, n)
+	must.NoError(err)
+	checks.Zero(n)
 	calls := len(e.Mock.GetMessageCalls)
 	acquisitionReplayRun(t, e, false)
-	assert.Len(t, e.Mock.GetMessageCalls, calls)
+	checks.Len(e.Mock.GetMessageCalls, calls)
 	acquisitionReplayAbsent(t, e, "race-id")
 }
 
@@ -210,7 +220,14 @@ func acquisitionReplayTransactionPause(t *testing.T, e *TestEnv, event, table, c
 		conn, err := e.Store.DB().Conn(t.Context())
 		require.NoError(t, err)
 		require.NoError(t, conn.Raw(func(driverConn any) error {
-			return driverConn.(*sqlite3.SQLiteConn).RegisterFunc("replay_barrier", func() int { close(reached); <-release; return 1 }, false)
+			sqliteConn, ok := driverConn.(*sqlite3.SQLiteConn)
+			if !ok {
+				return fmt.Errorf("expected SQLite connection, got %T", driverConn)
+			}
+			if err := sqliteConn.RegisterFunc("replay_barrier", func() int { close(reached); <-release; return 1 }, false); err != nil {
+				return fmt.Errorf("register acquisition replay barrier: %w", err)
+			}
+			return nil
 		}))
 		require.NoError(t, conn.Close())
 		_, err = e.Store.DB().Exec("CREATE TRIGGER replay_barrier AFTER " + event + " ON " + table + " WHEN " + condition + " BEGIN SELECT replay_barrier(); END")
@@ -231,12 +248,14 @@ func acquisitionReplayTransactionPause(t *testing.T, e *TestEnv, event, table, c
 
 func TestAcquisitionReplayResolutionTransactionExcludesPurge(t *testing.T) {
 	for _, full := range []bool{false, true} {
-		t.Run(fmt.Sprint(full), func(t *testing.T) {
+		t.Run(strconv.FormatBool(full), func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "race-id")
 			delete(e.Mock.GetMessageError, "race-id")
 			_, err := e.Syncer.ingestMessage(t.Context(), s.ID, e.Mock.Messages["race-id"], "thread", nil)
-			require.NoError(t, err)
+			must.NoError(err)
 			acquisitionReplayHide(t, e, s.ID)
 			wait, resume := acquisitionReplayTransactionPause(t, e, "INSERT", "sync_run_items", "NEW.error_kind='acquisition_resolved'")
 			done := make(chan error, 1)
@@ -252,17 +271,17 @@ func TestAcquisitionReplayResolutionTransactionExcludesPurge(t *testing.T) {
 			wait() // INSERT has executed, but its transaction has not committed.
 			acquisitionReplayProcessPurgeWithLock(t, e, true)
 			resume()
-			require.NoError(t, <-done)
+			must.NoError(<-done)
 			acquisitionReplayDropFault(t, e, "replay_barrier", []string{"sync_run_items"})
 			acquisitionReplayReopen(t, e)
 			acquisitionReplayRaw(t, e, "race-id")
-			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayResolved))
-			assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
+			checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayResolved))
+			checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
 			acquisitionReplayProcessPurge(t, e)
 			acquisitionReplayReopen(t, e)
 			calls := len(e.Mock.GetMessageCalls)
 			acquisitionReplayRun(t, e, false)
-			assert.Len(t, e.Mock.GetMessageCalls, calls)
+			checks.Len(e.Mock.GetMessageCalls, calls)
 			acquisitionReplayAbsent(t, e, "race-id")
 		})
 	}
@@ -294,6 +313,8 @@ func TestAcquisitionReplayCanceledPurgeRollsBackDisposition(t *testing.T) {
 func TestAcquisitionReplayLocalDeletionPrecedesLateDiagnostics(t *testing.T) {
 	for _, kind := range []string{"fetch_error", "batch_fetch_error", "ingest_error", "gmail_not_found", "message_gone", store.AcquisitionReplayResolved, store.AcquisitionReplaySourceDeleted} {
 		t.Run(kind, func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := e.CreateSourceWithHistory(t, "1000")
 			acquisitionReplayCreateAndResolveDebt(t, e, s, "race-id")
@@ -301,7 +322,7 @@ func TestAcquisitionReplayLocalDeletionPrecedesLateDiagnostics(t *testing.T) {
 			acquisitionReplayProcessPurge(t, e)
 			acquisitionReplayReopen(t, e)
 			var runID int64
-			require.NoError(t, e.Store.DB().QueryRow(e.Store.Rebind("SELECT max(id) FROM sync_runs WHERE source_id=?"), s.ID).Scan(&runID))
+			must.NoError(e.Store.DB().QueryRow(e.Store.Rebind("SELECT max(id) FROM sync_runs WHERE source_id=?"), s.ID).Scan(&runID))
 			item := store.SyncRunItem{SyncRunID: runID, SourceMessageID: "race-id", Phase: "fetch", Status: store.SyncRunItemStatusSkipped, ErrorKind: kind, ErrorMessage: "synthetic stale outcome"}
 			if kind == "ingest_error" {
 				item.Phase = "ingest"
@@ -309,23 +330,24 @@ func TestAcquisitionReplayLocalDeletionPrecedesLateDiagnostics(t *testing.T) {
 			if kind == "ingest_error" || strings.HasSuffix(kind, "fetch_error") {
 				item.Status = store.SyncRunItemStatusError
 			}
-			require.NoError(t, e.Store.RecordSyncRunItem(item))
+			must.NoError(e.Store.RecordSyncRunItem(item))
 			acquisitionReplayReopen(t, e)
 			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
-			assert.Empty(t, pending)
+			must.NoError(err)
+			checks.Empty(pending)
 			calls := len(e.Mock.GetMessageCalls)
 			acquisitionReplayRun(t, e, false)
-			assert.Len(t, e.Mock.GetMessageCalls, calls)
+			checks.Len(e.Mock.GetMessageCalls, calls)
 			acquisitionReplayAbsent(t, e, "race-id")
-			assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
+			checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
 		})
 	}
 }
 
 func TestAcquisitionReplayLocalDeletionSurvivesNewHistory(t *testing.T) {
 	for _, labels := range []bool{false, true} {
-		t.Run(fmt.Sprint(labels), func(t *testing.T) {
+		t.Run(strconv.FormatBool(labels), func(t *testing.T) {
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := e.CreateSourceWithHistory(t, "1000")
 			acquisitionReplayCreateAndResolveDebt(t, e, s, "race-id")
@@ -339,43 +361,45 @@ func TestAcquisitionReplayLocalDeletionSurvivesNewHistory(t *testing.T) {
 			e.SetHistory(1002, record)
 			result, err := e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
 			require.NoError(t, err)
-			assert.Zero(t, result.Errors)
-			assert.Zero(t, result.MessagesAdded)
+			checks.Zero(result.Errors)
+			checks.Zero(result.MessagesAdded)
 			acquisitionReplayReopen(t, e)
 			acquisitionReplayAbsent(t, e, "race-id")
 			calls := len(e.Mock.GetMessageCalls)
 			e.SetHistory(1002)
 			acquisitionReplayRun(t, e, false)
-			assert.Len(t, e.Mock.GetMessageCalls, calls)
+			checks.Len(e.Mock.GetMessageCalls, calls)
 			acquisitionReplayAbsent(t, e, "race-id")
 		})
 	}
 }
 
 func TestAcquisitionReplayDeletionBeforeFirstDiagnostic(t *testing.T) {
+	must := require.New(t)
+	checks := assert.New(t)
 	e := acquisitionReplayEnv(t)
 	s := e.CreateSourceWithHistory(t, "1000")
 	e.Mock.AddMessage("race-id", testMIME(), []string{"INBOX"})
 	e.SetHistory(1001, historyAdded("race-id"))
 	result, err := e.Syncer.Incremental(t.Context(), s)
-	require.NoError(t, err)
-	require.Zero(t, result.Errors)
+	must.NoError(err)
+	must.Zero(result.Errors)
 	var diagnostics int
-	require.NoError(t, e.Store.DB().QueryRow("SELECT count(*) FROM sync_run_items").Scan(&diagnostics))
-	require.Zero(t, diagnostics, "no debt or lifecycle event preceded the purge")
+	must.NoError(e.Store.DB().QueryRow("SELECT count(*) FROM sync_run_items").Scan(&diagnostics))
+	must.Zero(diagnostics, "no debt or lifecycle event preceded the purge")
 	acquisitionReplayHide(t, e, s.ID)
 	acquisitionReplayProcessPurge(t, e)
 	acquisitionReplayReopen(t, e)
-	assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
+	checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
 	// A stale label-refresh/acquisition failure may be its first diagnostic.
-	require.NoError(t, e.Store.RecordSyncRunItem(store.SyncRunItem{SyncRunID: result.SyncRunID, SourceMessageID: "race-id", Phase: "ingest", Status: store.SyncRunItemStatusError, ErrorKind: "ingest_error", ErrorMessage: "synthetic late first diagnostic"}))
+	must.NoError(e.Store.RecordSyncRunItem(store.SyncRunItem{SyncRunID: result.SyncRunID, SourceMessageID: "race-id", Phase: "ingest", Status: store.SyncRunItemStatusError, ErrorKind: "ingest_error", ErrorMessage: "synthetic late first diagnostic"}))
 	acquisitionReplayReopen(t, e)
 	calls := len(e.Mock.GetMessageCalls)
 	e.SetHistory(1001)
 	acquisitionReplayRun(t, e, false)
-	assert.Len(t, e.Mock.GetMessageCalls, calls)
+	checks.Len(e.Mock.GetMessageCalls, calls)
 	acquisitionReplayAbsent(t, e, "race-id")
-	requireAcquisitionErrorHistory(t, e, "race-id", 1)
+	requireAcquisitionErrorHistory(t, e, "race-id")
 }
 
 func TestAcquisitionReplayConcurrentLocalDeletion(t *testing.T) {
@@ -390,12 +414,14 @@ func TestAcquisitionReplayConcurrentLocalDeletion(t *testing.T) {
 				processName = "/separate-process"
 			}
 			t.Run(name+processName, func(t *testing.T) {
+				must := require.New(t)
+				checks := assert.New(t)
 				e := acquisitionReplayEnv(t)
 				s := acquisitionReplayDebt(t, e, "race-id")
 				delete(e.Mock.GetMessageError, "race-id")
 				// Model a committed RAW followed by an interruption before resolution.
 				_, err := e.Syncer.ingestMessage(t.Context(), s.ID, e.Mock.Messages["race-id"], "thread", nil)
-				require.NoError(t, err)
+				must.NoError(err)
 				acquisitionReplayHide(t, e, s.ID)
 				acquisitionReplayReopen(t, e)
 				wait, resume := acquisitionReplayPause(t, func(stmt string) bool {
@@ -416,24 +442,24 @@ func TestAcquisitionReplayConcurrentLocalDeletion(t *testing.T) {
 					acquisitionReplayProcessPurge(t, e)
 				} else {
 					n, err := acquisitionReplayPurge(t, e, "all")
-					require.NoError(t, err)
-					require.EqualValues(t, 1, n)
+					must.NoError(err)
+					must.EqualValues(1, n)
 				}
 				acquisitionReplayAbsent(t, e, "race-id")
 				resume()
-				require.NoError(t, <-done)
+				must.NoError(<-done)
 				acquisitionReplayReopen(t, e)
 				pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
-				require.NoError(t, err)
-				assert.Empty(t, pending, "a stale resolution must not reopen intentional destruction")
-				assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayResolved))
-				assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
+				must.NoError(err)
+				checks.Empty(pending, "a stale resolution must not reopen intentional destruction")
+				checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayResolved))
+				checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
 				calls := len(e.Mock.GetMessageCalls)
 				_, err = e.Syncer.Incremental(t.Context(), acquisitionReplaySource(t, e))
-				require.NoError(t, err)
-				assert.Len(t, e.Mock.GetMessageCalls, calls)
+				must.NoError(err)
+				checks.Len(e.Mock.GetMessageCalls, calls)
 				acquisitionReplayAbsent(t, e, "race-id")
-				requireAcquisitionErrorHistory(t, e, "race-id", 1)
+				requireAcquisitionErrorHistory(t, e, "race-id")
 			})
 		}
 	}
@@ -454,6 +480,8 @@ func TestAcquisitionReplayDeletionOrdering(t *testing.T) {
 	for _, full := range []bool{false, true} {
 		for _, order := range []string{"deletion-first", "resolution-first", "journal-failure", "delete-rollback", "canceled"} {
 			t.Run(fmt.Sprintf("full=%t/%s", full, order), func(t *testing.T) {
+				must := require.New(t)
+				checks := assert.New(t)
 				e := acquisitionReplayEnv(t)
 				s := e.CreateSourceWithHistory(t, "1000")
 				acquisitionReplayCreateAndResolveDebt(t, e, s, "race-id")
@@ -469,10 +497,10 @@ func TestAcquisitionReplayDeletionOrdering(t *testing.T) {
 				case "delete-rollback":
 					if e.Store.IsPostgreSQL() {
 						_, err := e.Store.DB().Exec(`CREATE FUNCTION purge_fault_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic delete rollback'; END $$; CREATE TRIGGER purge_fault BEFORE DELETE ON messages FOR EACH ROW EXECUTE FUNCTION purge_fault_fn()`)
-						require.NoError(t, err)
+						must.NoError(err)
 					} else {
 						_, err := e.Store.DB().Exec(`CREATE TRIGGER purge_fault BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT,'synthetic delete rollback'); END`)
-						require.NoError(t, err)
+						must.NoError(err)
 					}
 				}
 				ctx, cancel := context.WithCancel(t.Context())
@@ -483,34 +511,34 @@ func TestAcquisitionReplayDeletionOrdering(t *testing.T) {
 				cancel()
 				failed := order == "journal-failure" || order == "delete-rollback" || order == "canceled"
 				if failed {
-					require.Error(t, err)
-					assert.Zero(t, n)
+					must.Error(err)
+					checks.Zero(n)
 				} else {
-					require.NoError(t, err)
-					assert.EqualValues(t, 1, n)
+					must.NoError(err)
+					checks.EqualValues(1, n)
 				}
 				acquisitionReplayReopen(t, e)
 				if failed {
 					acquisitionReplayRaw(t, e, "race-id")
-					assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
+					checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
 					if order != "canceled" {
 						acquisitionReplayDropFault(t, e, "purge_fault", []string{"sync_run_items", "messages"})
 					}
 				} else {
 					acquisitionReplayAbsent(t, e, "race-id")
-					assert.Equal(t, 1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
+					checks.Equal(1, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
 				}
 				acquisitionReplayRun(t, e, full)
 				acquisitionReplayReopen(t, e)
 				calls := len(e.Mock.GetMessageCalls)
 				acquisitionReplayRun(t, e, false)
-				assert.Len(t, e.Mock.GetMessageCalls, calls)
+				checks.Len(e.Mock.GetMessageCalls, calls)
 				if failed {
 					acquisitionReplayRaw(t, e, "race-id")
 				} else {
 					acquisitionReplayAbsent(t, e, "race-id")
 				}
-				requireAcquisitionErrorHistory(t, e, "race-id", 1)
+				requireAcquisitionErrorHistory(t, e, "race-id")
 			})
 		}
 	}
@@ -518,6 +546,7 @@ func TestAcquisitionReplayDeletionOrdering(t *testing.T) {
 
 type acquisitionReplayFetchBarrier struct {
 	*gmail.MockAPI
+
 	reached chan struct{}
 	release chan struct{}
 }
@@ -532,10 +561,12 @@ func (a *acquisitionReplayFetchBarrier) GetMessagesRawBatchWithErrors(ctx contex
 func TestAcquisitionReplayDeletionDuringFetch(t *testing.T) {
 	for _, tc := range []struct{ full, sourceDeleted bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
 		t.Run(fmt.Sprintf("full=%t/source-deleted=%t", tc.full, tc.sourceDeleted), func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "race-id")
 			if tc.sourceDeleted {
-				require.NoError(t, e.Store.MarkMessagesDeletedBatch(s.ID, []string{"race-id"}))
+				must.NoError(e.Store.MarkMessagesDeletedBatch(s.ID, []string{"race-id"}))
 				e.SetHistory(1002, historyAdded("race-id"))
 			}
 			delete(e.Mock.GetMessageError, "race-id")
@@ -554,21 +585,21 @@ func TestAcquisitionReplayDeletionDuringFetch(t *testing.T) {
 			select {
 			case <-api.reached:
 			case <-time.After(30 * time.Second):
-				require.FailNow(t, "fetch barrier not reached")
+				must.FailNow("fetch barrier not reached")
 			}
 			// Another writer has archived the occurrence before explicit cleanup.
 			_, err := New(e.Mock, e.Store, nil).ingestMessage(t.Context(), s.ID, e.Mock.Messages["race-id"], "thread", nil)
-			require.NoError(t, err)
+			must.NoError(err)
 			acquisitionReplayHide(t, e, s.ID)
 			acquisitionReplayProcessPurge(t, e)
 			close(api.release)
-			require.NoError(t, <-done)
+			must.NoError(<-done)
 			acquisitionReplayReopen(t, e)
 			acquisitionReplayAbsent(t, e, "race-id")
-			assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayResolved))
+			checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayResolved))
 			calls := len(e.Mock.GetMessageCalls)
 			acquisitionReplayRun(t, e, false)
-			assert.Len(t, e.Mock.GetMessageCalls, calls)
+			checks.Len(e.Mock.GetMessageCalls, calls)
 			acquisitionReplayAbsent(t, e, "race-id")
 		})
 	}
@@ -576,12 +607,14 @@ func TestAcquisitionReplayDeletionDuringFetch(t *testing.T) {
 
 func TestAcquisitionReplayRawLossDuringResolution(t *testing.T) {
 	for _, full := range []bool{false, true} {
-		t.Run(fmt.Sprint(full), func(t *testing.T) {
+		t.Run(strconv.FormatBool(full), func(t *testing.T) {
+			must := require.New(t)
+			checks := assert.New(t)
 			e := acquisitionReplayEnv(t)
 			s := acquisitionReplayDebt(t, e, "race-id")
 			delete(e.Mock.GetMessageError, "race-id")
 			_, err := e.Syncer.ingestMessage(t.Context(), s.ID, e.Mock.Messages["race-id"], "thread", nil)
-			require.NoError(t, err)
+			must.NoError(err)
 			wait, resume := acquisitionReplayPause(t, func(stmt string) bool { return strings.Contains(stmt, "FROM messages m JOIN message_raw mr") })
 			done := make(chan error, 1)
 			go func() {
@@ -595,24 +628,24 @@ func TestAcquisitionReplayRawLossDuringResolution(t *testing.T) {
 			}()
 			wait()
 			_, err = e.Store.DB().Exec("DELETE FROM message_raw")
-			require.NoError(t, err)
+			must.NoError(err)
 			resume()
-			require.NoError(t, <-done)
+			must.NoError(<-done)
 			acquisitionReplayReopen(t, e)
 			pending, err := e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
-			assert.Equal(t, []string{"race-id"}, pending)
-			assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayResolved))
-			assert.Zero(t, acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
+			must.NoError(err)
+			checks.Equal([]string{"race-id"}, pending)
+			checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayResolved))
+			checks.Zero(acquisitionReplayDispositions(t, e, s.ID, "race-id", store.AcquisitionReplayLocalDeletion))
 			acquisitionReplayRun(t, e, false)
 			acquisitionReplayReopen(t, e)
 			acquisitionReplayRaw(t, e, "race-id")
 			pending, err = e.Store.PendingAcquisitionReplayIDs(s.ID)
-			require.NoError(t, err)
-			assert.Empty(t, pending)
+			must.NoError(err)
+			checks.Empty(pending)
 			calls := len(e.Mock.GetMessageCalls)
 			acquisitionReplayRun(t, e, false)
-			assert.Len(t, e.Mock.GetMessageCalls, calls)
+			checks.Len(e.Mock.GetMessageCalls, calls)
 		})
 	}
 }

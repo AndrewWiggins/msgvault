@@ -3615,7 +3615,7 @@ func (s *Store) ReconcileSourceMessageSnapshot(
 				return fmt.Errorf("reconcile acquisition inventory: %w", err)
 			}
 			for id, state := range states {
-				if _, found := present[id]; found || state == "terminal" || state == "local-deleted" {
+				if _, found := present[id]; found || state == acquisitionStateTerminal || state == acquisitionStateLocalDeleted {
 					continue
 				}
 				if err := s.appendAcquisitionReplayDispositionWith(

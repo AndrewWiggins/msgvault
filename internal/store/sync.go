@@ -28,6 +28,11 @@ const (
 	AcquisitionReplayLocalDeletion = "acquisition_local_deletion"
 	AcquisitionReplaySourceDeleted = "acquisition_source_deleted"
 
+	acquisitionStatePending      = "pending"
+	acquisitionStateAcquired     = "acquired"
+	acquisitionStateTerminal     = "terminal"
+	acquisitionStateLocalDeleted = "local-deleted"
+
 	manualTransactionCleanupTimeout = 5 * time.Second
 	syncWorkerExitedMessage         = "sync worker exited before recording completion"
 	syncRunRestartedError           = "daemon_restarted"
@@ -1077,7 +1082,7 @@ func (s *Store) acquisitionReplayLatestKindsWith(
 	if err != nil {
 		return nil, fmt.Errorf("read acquisition lifecycle batch: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var sourceMessageID, kind string
 		if err := rows.Scan(&sourceMessageID, &kind); err != nil {
@@ -1087,6 +1092,9 @@ func (s *Store) acquisitionReplayLatestKindsWith(
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate acquisition lifecycle batch: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close acquisition lifecycle batch: %w", err)
 	}
 	return latestKinds, nil
 }
@@ -1226,11 +1234,11 @@ func (s *Store) AcquisitionReplayState(sourceID int64) (pendingIDs, terminalIDs 
 	terminalIDs = make([]string, 0)
 	for id, state := range states {
 		switch state {
-		case "pending":
+		case acquisitionStatePending:
 			pendingIDs = append(pendingIDs, id)
-		case "acquired":
+		case acquisitionStateAcquired:
 			acquired = append(acquired, id)
-		case "terminal":
+		case acquisitionStateTerminal:
 			terminalIDs = append(terminalIDs, id)
 		}
 	}
@@ -1274,7 +1282,7 @@ func (s *Store) acquisitionReplayStatesWith(ctx context.Context, q chunkQuerier,
 	if err != nil {
 		return nil, fmt.Errorf("read acquisition debt: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	states := make(map[string]string)
 	for rows.Next() {
 		var messageID, status, phase, errorKind string
@@ -1285,26 +1293,29 @@ func (s *Store) acquisitionReplayStatesWith(ctx context.Context, q chunkQuerier,
 		// identity. Later stale fetch errors, resolutions or remote observations
 		// remain diagnostics; none can revoke that policy. Remote deletion alone
 		// remains reopenable by subsequent History acquisition events.
-		if states[messageID] == "local-deleted" {
+		if states[messageID] == acquisitionStateLocalDeleted {
 			continue
 		}
 		if status == SyncRunItemStatusSkipped && phase == "fetch" {
 			switch errorKind {
 			case AcquisitionReplayLocalDeletion:
-				states[messageID] = "local-deleted"
+				states[messageID] = acquisitionStateLocalDeleted
 			case "message_gone", AcquisitionReplaySourceDeleted:
-				states[messageID] = "terminal"
+				states[messageID] = acquisitionStateTerminal
 			case AcquisitionReplayResolved:
-				states[messageID] = "acquired"
+				states[messageID] = acquisitionStateAcquired
 			default:
-				states[messageID] = "pending"
+				states[messageID] = acquisitionStatePending
 			}
 		} else {
-			states[messageID] = "pending"
+			states[messageID] = acquisitionStatePending
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close acquisition debt: %w", err)
 	}
 	return states, nil
 }
