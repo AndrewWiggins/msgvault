@@ -1386,6 +1386,15 @@ func (s *Syncer) full(
 		s.failStoppedSync(state.syncID, err)
 		return nil, fmt.Errorf("sync labels: %w", err)
 	}
+	pendingReplayIDs, err := s.pendingFetchReplayIDs(source.ID)
+	if err != nil {
+		s.failStoppedSync(state.syncID, err)
+		return nil, fmt.Errorf("read acquisition replay debt: %w", err)
+	}
+	pendingReplaySet := make(map[string]struct{}, len(pendingReplayIDs))
+	for _, id := range pendingReplayIDs {
+		pendingReplaySet[id] = struct{}{}
+	}
 
 	// Settle any discovery debt a previous run parked before this run adds to it.
 	s.drainIdentityDiscoveryBacklog(ctx, source.ID)
@@ -1435,6 +1444,13 @@ func (s *Syncer) full(
 			return nil, err
 		}
 
+		for _, id := range result.acknowledged {
+			if _, pending := pendingReplaySet[id]; pending {
+				s.recordSyncItem(state.syncID, id, syncItemPhaseFetch,
+					store.SyncRunItemStatusSkipped, syncItemKindAcquisitionResolved, nil)
+				delete(pendingReplaySet, id)
+			}
+		}
 		if err := s.requireRecordedSyncItems(state.syncID); err != nil {
 			return nil, err
 		}

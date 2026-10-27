@@ -776,6 +776,31 @@ func (s *Store) DeleteDedupedBatchesContext(
 	var deleted int64
 	err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
 		for _, batchID := range batchIDs {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+				INSERT INTO sync_run_items (
+					sync_run_id, source_message_id, phase, status, error_kind, error_message, created_at
+				)
+				SELECT (
+					SELECT id FROM sync_runs WHERE source_id = messages.source_id ORDER BY id DESC LIMIT 1
+				), messages.source_message_id, 'fetch', 'skipped', ?, ?, %s
+				FROM messages
+				JOIN sources src ON src.id = messages.source_id AND src.source_type = 'gmail'
+				WHERE messages.delete_batch_id = ? AND messages.deleted_at IS NOT NULL
+				  AND EXISTS (SELECT 1 FROM sync_runs run WHERE run.source_id = messages.source_id)
+				  AND EXISTS (
+					SELECT 1 FROM sync_run_items item
+					JOIN sync_runs prior_run ON prior_run.id = item.sync_run_id
+					WHERE prior_run.source_id = messages.source_id
+					  AND item.source_message_id = messages.source_message_id
+					  AND item.phase IN ('fetch', 'ingest')
+					  AND item.error_kind IN ('fetch_error', 'batch_fetch_error', 'ingest_error',
+					      'gmail_not_found', 'message_gone', 'acquisition_resolved',
+					      'acquisition_local_deletion', 'acquisition_source_deleted')
+				  )
+			`, s.dialect.Now()), AcquisitionReplayLocalDeletion,
+				"Gmail message explicitly removed in local dedup cleanup", batchID); err != nil {
+				return fmt.Errorf("record Gmail acquisition resolution before dedup deletion %q: %w", batchID, err)
+			}
 			result, err := tx.ExecContext(ctx, `
 				DELETE FROM messages
 				WHERE delete_batch_id = ? AND deleted_at IS NOT NULL

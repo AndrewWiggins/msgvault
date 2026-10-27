@@ -3465,18 +3465,20 @@ func (s *Store) MarkMessageDeletedContext(ctx context.Context, sourceID int64, s
 	if err := s.requireSyncSource(sourceID); err != nil {
 		return err
 	}
-	write := func(q querier) error {
-		_, err := q.Exec(fmt.Sprintf(`
+	return s.withTxContext(ctx, func(tx *loggedTx) error {
+		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE messages
 			SET deleted_from_source_at = %s
 			WHERE source_id = ? AND source_message_id = ? AND deleted_from_source_at IS NULL
 		`, s.dialect.Now()), sourceID, sourceMessageID)
-		return err
-	}
-	if s.syncGeneration == nil {
-		return write(boundQuerier{ctx: ctx, q: s.db})
-	}
-	return s.withTxContext(ctx, func(tx *loggedTx) error { return write(boundQuerier{ctx: ctx, q: tx}) })
+		if err != nil {
+			return err
+		}
+		return s.recordAcquisitionReplayDispositionWith(
+			tx, sourceID, sourceMessageID, AcquisitionReplaySourceDeleted,
+			"Gmail source deletion observed",
+		)
+	})
 }
 
 // ClearMessageDeletedFromSource clears the upstream tombstone when a message
@@ -3512,14 +3514,21 @@ func (s *Store) MarkMessagesDeletedBatch(sourceID int64, sourceMessageIDs []stri
 	if err := s.requireSyncSource(sourceID); err != nil {
 		return err
 	}
-	write := func(q chunkQuerier) error {
-		return execInChunks(q, sourceMessageIDs, []any{sourceID},
-			fmt.Sprintf(`UPDATE messages SET deleted_from_source_at = %s WHERE source_id = ? AND source_message_id IN (%%s) AND deleted_from_source_at IS NULL`, s.dialect.Now()))
-	}
-	if s.syncGeneration == nil {
-		return write(s.db)
-	}
-	return s.withTx(func(tx *loggedTx) error { return write(tx) })
+	return s.withTxContext(context.Background(), func(tx *loggedTx) error {
+		if err := execInChunksContext(context.Background(), tx, sourceMessageIDs, []any{sourceID},
+			fmt.Sprintf(`UPDATE messages SET deleted_from_source_at = %s WHERE source_id = ? AND source_message_id IN (%%s) AND deleted_from_source_at IS NULL`, s.dialect.Now())); err != nil {
+			return err
+		}
+		for _, sourceMessageID := range sourceMessageIDs {
+			if err := s.recordAcquisitionReplayDispositionWith(
+				tx, sourceID, sourceMessageID, AcquisitionReplaySourceDeleted,
+				"Gmail source deletion observed",
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // ReconcileSourceMessageSnapshot tombstones locally live messages that are

@@ -24,6 +24,10 @@ const (
 	SyncRunItemStatusError   = "error"
 	SyncRunItemStatusSkipped = "skipped"
 
+	AcquisitionReplayResolved      = "acquisition_resolved"
+	AcquisitionReplayLocalDeletion = "acquisition_local_deletion"
+	AcquisitionReplaySourceDeleted = "acquisition_source_deleted"
+
 	manualTransactionCleanupTimeout = 5 * time.Second
 	syncWorkerExitedMessage         = "sync worker exited before recording completion"
 	syncRunRestartedError           = "daemon_restarted"
@@ -946,10 +950,66 @@ func (s *Store) RecordSyncRunItemContext(ctx context.Context, item SyncRunItem) 
 	return nil
 }
 
+// recordAcquisitionReplayDispositionWith appends an explicit lifecycle event
+// for a Gmail acquisition ID. It is called inside the same transaction as a
+// deletion/tombstone so a committed removal cannot lose its replay decision.
+func (s *Store) recordAcquisitionReplayDispositionWith(
+	q querier, sourceID int64, sourceMessageID, kind, message string,
+) error {
+	var sourceType string
+	if err := q.QueryRow(`SELECT source_type FROM sources WHERE id = ?`, sourceID).Scan(&sourceType); err != nil {
+		return fmt.Errorf("read acquisition lifecycle source: %w", err)
+	}
+	if sourceType != "gmail" {
+		return nil
+	}
+	var tracked bool
+	if err := q.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM sync_run_items item
+			JOIN sync_runs run ON run.id = item.sync_run_id
+			WHERE run.source_id = ? AND item.source_message_id = ?
+			  AND item.phase IN ('fetch', 'ingest')
+			  AND item.error_kind IN (
+				'fetch_error', 'batch_fetch_error', 'ingest_error',
+				'gmail_not_found', 'message_gone',
+				'acquisition_resolved', 'acquisition_local_deletion',
+				'acquisition_source_deleted'
+			  )
+		)`, sourceID, sourceMessageID).Scan(&tracked); err != nil {
+		return fmt.Errorf("check acquisition lifecycle history: %w", err)
+	}
+	if !tracked {
+		return nil
+	}
+	runID := int64(0)
+	if s.syncGeneration != nil && s.syncGeneration.sourceID == sourceID {
+		runID = s.syncGeneration.runID
+	} else if err := q.QueryRow(`
+		SELECT id FROM sync_runs WHERE source_id = ? ORDER BY id DESC LIMIT 1`, sourceID).Scan(&runID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("find acquisition lifecycle run: %w", err)
+	}
+	_, err := q.Exec(fmt.Sprintf(`
+		INSERT INTO sync_run_items (
+			sync_run_id, source_message_id, phase, status, error_kind, error_message, created_at
+		) VALUES (?, ?, 'fetch', 'skipped', ?, ?, %s)
+	`, s.dialect.Now()), runID, sourceMessageID, kind, message)
+	if err != nil {
+		return fmt.Errorf("record acquisition lifecycle decision: %w", err)
+	}
+	return nil
+}
+
 // PendingAcquisitionReplayIDs reads unresolved acquisition errors across all
-// source runs, including full, failed and legacy untyped runs. Diagnostics are
-// append-only: only a later explicit gone-message skip acknowledges an error.
-// The caller must additionally check for successfully persisted RAW content.
+// source runs, including full, failed and legacy untyped runs. Diagnostics and
+// lifecycle decisions are append-only. A prior acquisition resolution is
+// valid only while its RAW remains present; explicit local/source deletion
+// events survive physical removal of the message row. If an object was
+// physically removed before lifecycle events existed, an old failure cannot
+// distinguish that intent from accidental RAW loss and remains retryable.
 func (s *Store) PendingAcquisitionReplayIDs(sourceID int64) ([]string, error) {
 	rows, err := s.db.Query(`
   SELECT item.source_message_id, item.status, item.phase, item.error_kind
@@ -960,30 +1020,52 @@ func (s *Store) PendingAcquisitionReplayIDs(sourceID int64) ([]string, error) {
           ((item.phase = 'fetch' AND item.error_kind IN ('fetch_error', 'batch_fetch_error'))
             OR (item.phase = 'ingest' AND item.error_kind = 'ingest_error')))
       OR (item.status = 'skipped' AND item.phase = 'fetch'
-          AND item.error_kind IN ('message_gone', 'gmail_not_found')))
+          AND item.error_kind IN ('message_gone', 'gmail_not_found',
+              'acquisition_resolved', 'acquisition_local_deletion',
+              'acquisition_source_deleted')))
   ORDER BY item.id`, sourceID)
 	if err != nil {
 		return nil, fmt.Errorf("read acquisition debt: %w", err)
 	}
 	defer rows.Close()
-	debt := make(map[string]bool)
+	states := make(map[string]string)
 	for rows.Next() {
 		var messageID, status, phase, errorKind string
 		if err := rows.Scan(&messageID, &status, &phase, &errorKind); err != nil {
 			return nil, err
 		}
-		if status == SyncRunItemStatusSkipped && phase == "fetch" && errorKind == "message_gone" {
-			debt[messageID] = false
+		if status == SyncRunItemStatusSkipped && phase == "fetch" {
+			switch errorKind {
+			case "message_gone", AcquisitionReplayLocalDeletion, AcquisitionReplaySourceDeleted:
+				states[messageID] = "terminal"
+			case AcquisitionReplayResolved:
+				states[messageID] = "acquired"
+			default:
+				states[messageID] = "pending"
+			}
 		} else {
-			debt[messageID] = true
+			states[messageID] = "pending"
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(debt))
-	for id, pending := range debt {
-		if pending {
+	acquired := make([]string, 0, len(states))
+	ids := make([]string, 0, len(states))
+	for id, state := range states {
+		switch state {
+		case "pending":
+			ids = append(ids, id)
+		case "acquired":
+			acquired = append(acquired, id)
+		}
+	}
+	withRaw, err := s.MessageExistsWithRawBatch(sourceID, acquired)
+	if err != nil {
+		return nil, fmt.Errorf("check resolved acquisition RAW: %w", err)
+	}
+	for _, id := range acquired {
+		if _, ok := withRaw[id]; !ok {
 			ids = append(ids, id)
 		}
 	}

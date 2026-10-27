@@ -2048,8 +2048,8 @@ CREATE INDEX IF NOT EXISTS idx_person_sweep_sync_publications_source
 
 -- Per-item sync outcomes, for diagnosing partial sync completion.
 -- status='error' is actionable and contributes to sync_runs.errors_count.
--- status='skipped' records expected item churn, such as Gmail messages that
--- were deleted between a history/list response and raw-message fetch.
+-- status='skipped' records expected item churn and durable acquisition
+-- lifecycle decisions (acquired, explicitly removed locally, or source-deleted).
 CREATE TABLE IF NOT EXISTS sync_run_items (
     id INTEGER PRIMARY KEY,
     sync_run_id INTEGER NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
