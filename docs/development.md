@@ -479,7 +479,11 @@ that had the index without Inline. It checks the migration ledger and index
 independently; the version number alone does not identify the old variant.
 The upgrade tests verify each historical schema fingerprint before setup and
 check both features afterward. No table rebuild or data deletion is needed.
-Readers of either version-14 variant must run setup before using version 15.
+The archive owner must complete version-15 setup before either variant can be
+opened by version-15 readers. Embedded applications must upgrade their archive
+library too; runtime readers never migrate. PostgreSQL builds the index
+concurrently on populated archives; failed maintenance builds retry on later
+setup runs under the existing best-effort policy.
 
 Filename suggestions require archive schema version 6 and API schema 3.15,
 newer than the latest release. Version 6 creates empty projection tables;

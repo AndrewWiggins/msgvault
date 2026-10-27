@@ -1011,6 +1011,8 @@ const acquisitionLocalDeletionIndexName = "idx_sync_run_items_local_deletion"
 
 // Native IDs are selective but only source-scoped. Keep the run ID in the
 // partial index to verify source ownership without scanning unrelated outcomes.
+// Only local-deletion decisions block persistence. Repeated decisions are valid,
+// so the index excludes other outcomes and must remain nonunique.
 const acquisitionLocalDeletionIndexDefinition = `ON sync_run_items(source_message_id, sync_run_id)
 	WHERE phase='fetch' AND status='skipped' AND error_kind='acquisition_local_deletion'`
 
@@ -1087,9 +1089,10 @@ func (s *Store) appendAcquisitionReplayDispositionWith(
 // source runs, including full, failed and legacy untyped runs. Diagnostics and
 // lifecycle decisions are append-only. A prior acquisition resolution is
 // valid only while its RAW remains present; explicit local/source deletion
-// events survive physical removal of the message row. If an object was
-// physically removed before lifecycle events existed, an old failure cannot
-// distinguish that intent from accidental RAW loss and remains retryable.
+// events survive physical removal of the message row. Local deletion overrides
+// every later outcome; remote disappearance can be superseded by later
+// acquisition events. Without a recorded disposition, historical removal cannot
+// be distinguished from accidental RAW loss, so an old failure stays retryable.
 func (s *Store) PendingAcquisitionReplayIDs(sourceID int64) ([]string, error) {
 	states, err := s.acquisitionReplayStatesWith(context.Background(), s.db, sourceID)
 	if err != nil {

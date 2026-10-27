@@ -176,13 +176,14 @@ Purge holds the exclusive identity gate, so it can delay other archive writes;
 network fetches hold no such gate.
 
 Ordinary sync may advance its cursor past a failed acquisition only after the
-diagnostic is durable. Failure to record an outcome blocks the next checkpoint
-or final cursor publication. A failed source-deletion transaction also stops the
+diagnostic is durable. Failure to record an outcome prevents checkpoint or final
+cursor advancement past it. A failed source-deletion transaction also stops the
 run: its `delete_error` diagnostic is not replayable acquisition debt.
-Each eligible sync makes one replay attempt per outstanding ID; there is no
-automatic retry ceiling. A physical deletion made before these dispositions
-existed cannot be distinguished from accidental loss
-and remains retryable if an old failure is recorded.
+Incremental replay attempts each pending ID once per run, even with no new
+History events. A full traversal settles only the debt it visits; filtered or
+limited traversals leave other debt pending. There is no automatic retry ceiling.
+A physical deletion made before these dispositions existed cannot be distinguished
+from accidental loss and remains retryable if an old failure is recorded.
 
 ## Read further
 

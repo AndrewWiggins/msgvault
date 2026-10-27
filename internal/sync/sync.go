@@ -1531,9 +1531,9 @@ func (s *Syncer) full(
 		s.drainIdentityDiscoveryBacklog(ctx, source.ID)
 	}
 
-	// Update source with final history ID.
-	// Full sync always advances the cursor (it records the starting point
-	// for future incremental syncs), but warn when errors occurred.
+	// Publish the starting or pinned handoff cursor after required outcomes are
+	// durable. Fetch/ingest failures remain replayable debt and need not block
+	// completion.
 	historyIDStr := strconv.FormatUint(handoffHistoryID, 10)
 	if state.checkpoint.ErrorsCount > 0 {
 		s.logger.Warn("full sync completed with errors",

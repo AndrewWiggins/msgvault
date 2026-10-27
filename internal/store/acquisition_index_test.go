@@ -77,6 +77,8 @@ func TestAcquisitionLocalDeletionIndexUpgrade(t *testing.T) {
 				case "official-v14":
 					sqliteDigest, pgDigest = schemaContractDigests[14], schemaContractPostgresDigests[14]
 				case "experimental-v14":
+					// The index-only v14 predates the official Inline seed. Keep
+					// its alternate digests outside the canonical version history.
 					sqliteDigest = "e29d6da841eff56a84293786236df395bbb63a30c83f588d9a95d7ce2ffe4b66"
 					pgDigest = "d2ec44a7dd55a81f63467b940d842374712a2b01013734fbb62800ce17904487"
 				}
