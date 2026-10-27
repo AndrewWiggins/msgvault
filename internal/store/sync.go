@@ -986,25 +986,38 @@ func (s *Store) recordAcquisitionReplayDispositionWith(
 	if sourceType != "gmail" {
 		return nil
 	}
-	var tracked bool
-	if err := q.QueryRow(`
-		SELECT EXISTS (
-			SELECT 1 FROM sync_run_items item
-			JOIN sync_runs run ON run.id = item.sync_run_id
-			WHERE run.source_id = ? AND item.source_message_id = ?
-			  AND item.phase IN ('fetch', 'ingest')
-			  AND item.error_kind IN (
-				'fetch_error', 'batch_fetch_error', 'ingest_error',
-				'gmail_not_found', 'message_gone',
-				'acquisition_resolved', 'acquisition_local_deletion',
-				'acquisition_source_deleted'
-			  )
-		)`, sourceID, sourceMessageID).Scan(&tracked); err != nil {
-		return fmt.Errorf("check acquisition lifecycle history: %w", err)
-	}
-	if !tracked {
+	var latestKind string
+	err := q.QueryRow(`
+		SELECT item.error_kind
+		FROM sync_run_items item
+		JOIN sync_runs run ON run.id = item.sync_run_id
+		WHERE run.source_id = ? AND item.source_message_id = ?
+		  AND item.phase IN ('fetch', 'ingest')
+		  AND item.error_kind IN (
+			'fetch_error', 'batch_fetch_error', 'ingest_error',
+			'gmail_not_found', 'message_gone',
+			'acquisition_resolved', 'acquisition_local_deletion',
+			'acquisition_source_deleted'
+		  )
+		ORDER BY item.id DESC LIMIT 1`, sourceID, sourceMessageID).Scan(&latestKind)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("check acquisition lifecycle history: %w", err)
+	}
+	// Repeat acknowledgements add no duplicate event.
+	if latestKind == kind {
+		return nil
+	}
+	return s.appendAcquisitionReplayDispositionWith(q, sourceID, sourceMessageID, kind, message)
+}
+
+// appendAcquisitionReplayDispositionWith is also used after a transaction has
+// already folded the journal, avoiding one full journal lookup per absent ID.
+func (s *Store) appendAcquisitionReplayDispositionWith(
+	q querier, sourceID int64, sourceMessageID, kind, message string,
+) error {
 	runID := int64(0)
 	if s.syncGeneration != nil && s.syncGeneration.sourceID == sourceID {
 		runID = s.syncGeneration.runID
@@ -1034,7 +1047,38 @@ func (s *Store) recordAcquisitionReplayDispositionWith(
 // physically removed before lifecycle events existed, an old failure cannot
 // distinguish that intent from accidental RAW loss and remains retryable.
 func (s *Store) PendingAcquisitionReplayIDs(sourceID int64) ([]string, error) {
-	rows, err := s.db.Query(`
+	states, err := s.acquisitionReplayStatesWith(context.Background(), s.db, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	acquired := make([]string, 0, len(states))
+	ids := make([]string, 0, len(states))
+	for id, state := range states {
+		switch state {
+		case "pending":
+			ids = append(ids, id)
+		case "acquired":
+			acquired = append(acquired, id)
+		}
+	}
+	withRaw, err := s.MessageExistsWithRawBatch(sourceID, acquired)
+	if err != nil {
+		return nil, fmt.Errorf("check resolved acquisition RAW: %w", err)
+	}
+	for _, id := range acquired {
+		if _, ok := withRaw[id]; !ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// acquisitionReplayStatesWith folds the same native-ID lifecycle for both
+// replay and complete-inventory reconciliation. Reading through q lets the
+// inventory acknowledgements and tombstones share one fenced transaction.
+func (s *Store) acquisitionReplayStatesWith(ctx context.Context, q chunkQuerier, sourceID int64) (map[string]string, error) {
+	rows, err := q.QueryContext(ctx, `
   SELECT item.source_message_id, item.status, item.phase, item.error_kind
   FROM sync_run_items item
   JOIN sync_runs run ON run.id = item.sync_run_id
@@ -1073,27 +1117,7 @@ func (s *Store) PendingAcquisitionReplayIDs(sourceID int64) ([]string, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	acquired := make([]string, 0, len(states))
-	ids := make([]string, 0, len(states))
-	for id, state := range states {
-		switch state {
-		case "pending":
-			ids = append(ids, id)
-		case "acquired":
-			acquired = append(acquired, id)
-		}
-	}
-	withRaw, err := s.MessageExistsWithRawBatch(sourceID, acquired)
-	if err != nil {
-		return nil, fmt.Errorf("check resolved acquisition RAW: %w", err)
-	}
-	for _, id := range acquired {
-		if _, ok := withRaw[id]; !ok {
-			ids = append(ids, id)
-		}
-	}
-	sort.Strings(ids)
-	return ids, nil
+	return states, nil
 }
 
 // CountSyncRunItems returns the number of recorded per-item sync outcomes for
