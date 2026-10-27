@@ -3794,6 +3794,11 @@ when backups are enabled, the daemon writes the backup next to the database it
 owns before deleting. Repeated `--batch` selections commit as one transaction;
 if the request is canceled, none of the selected batches are left half-deleted.
 
+For Gmail, both deletion modes durably record the intentional removal before
+destroying the rows. Automatic sync will not reacquire those source/native
+message IDs. Accidental RAW loss in a tracked acquisition remains repairable;
+see [Gmail acquisition debt](architecture/overview.md#gmail-acquisition-failures-survive-sync-progress).
+
 | Flag | Description |
 |---|---|
 | `--batch` | Delete rows hidden by this dedup batch ID; repeatable |

@@ -124,10 +124,6 @@ func (s *Syncer) requireRecordedSyncItems(syncID int64) error {
 	return err
 }
 
-func isMessageGone(err error) bool {
-	return errors.Is(err, gmail.ErrMessageGone)
-}
-
 // messageGoneKind reports whether the source explicitly confirmed that the
 // message disappeared between enumeration and fetch. A generic Gmail 404 only
 // proves that the API returned not found; it does not establish permanent

@@ -955,12 +955,18 @@ func (s *Store) PinSyncHandoffCursorContext(ctx context.Context, syncID int64, c
 	})
 }
 
-// RecordSyncRunItem records a per-item sync outcome for diagnostics.
+// RecordSyncRunItem appends a per-item sync outcome without replacing earlier
+// diagnostics. A fetch/skipped/acquisition_resolved outcome is conditional:
+// the RAW must still exist and no intentional local deletion may have committed.
+// The check and append share a transaction and database locks with acquisition
+// and purge, including across processes. A nil result can mean resolution was
+// suppressed; it does not guarantee that a journal row was inserted.
 func (s *Store) RecordSyncRunItem(item SyncRunItem) error {
 	return s.RecordSyncRunItemContext(context.Background(), item)
 }
 
-// RecordSyncRunItemContext honors cancellation during RecordSyncRunItem.
+// RecordSyncRunItemContext honors cancellation during RecordSyncRunItem,
+// including its conditional resolution: nil need not mean a row was inserted.
 func (s *Store) RecordSyncRunItemContext(ctx context.Context, item SyncRunItem) error {
 	if item.Phase == "fetch" && item.Status == SyncRunItemStatusSkipped && item.ErrorKind == AcquisitionReplayResolved {
 		var sourceID int64
@@ -1024,9 +1030,12 @@ func acquisitionLocallyDeletedWith(q querier, sourceID int64, nativeID string) (
 	return deleted, nil
 }
 
-// recordAcquisitionReplayDispositionWith appends an explicit lifecycle event
-// for a Gmail acquisition ID. It is called inside the same transaction as a
-// deletion/tombstone so a committed removal cannot lose its replay decision.
+// recordAcquisitionReplayDispositionWith appends a lifecycle event only for a
+// Gmail ID with an existing acquisition history. Non-Gmail sources, untracked
+// IDs and an already-current disposition return nil without inserting a row.
+// Callers supply the deletion/tombstone transaction so removal and its replay
+// decision commit together. Dedup purge separately records local intent even
+// for IDs with no prior acquisition history, blocking a first late outcome.
 func (s *Store) recordAcquisitionReplayDispositionWith(
 	q querier, sourceID int64, sourceMessageID, kind, message string,
 ) error {
