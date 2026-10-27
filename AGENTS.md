@@ -98,6 +98,12 @@ Use these as reasoning checkpoints, not a requirement to create a design doc.
   the commit message.
 - Do not write shell tests that grep scripts, workflows, config, or docs for
   expected implementation text. Use real execution or tool-native validation.
+- Never locate files from a path returned by `runtime.Caller` or a stack
+  trace; builds use `-trimpath`, so those paths are module-relative. Tests run
+  from their package directory, so use paths relative to it.
+- A test package that loads a named time zone must import `time/tzdata` in a
+  `_test.go` file. Trimmed builds cannot fall back to GOROOT's zone database,
+  and Windows has no system database.
 - A timeout may bound a wait for an observable transition. Do not make runner
   throughput a correctness requirement, such as ten polls within one second.
 

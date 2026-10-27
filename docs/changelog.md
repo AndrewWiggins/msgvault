@@ -11,14 +11,15 @@ All notable changes to msgvault, grouped by release.
 - Gmail sync retains its History cursor when a source-deletion transaction fails,
   including when its acquisition disposition cannot be recorded. A later sync
   retries the deletion instead of losing it behind an advanced cursor.
-- Archive schema version 14 adds a partial index for intentional Gmail local
+- Archive schema version 15 adds a partial index for intentional Gmail local
   deletions, avoiding repeated journal scans during acquisition. Existing
   archives build it during setup; PostgreSQL builds it concurrently. Embedded
-  readers must support version 14 after the upgrade, even though table layouts
+  readers must support version 15 after the upgrade, even though table layouts
   are unchanged. See [schema version maintenance](development.md#archive-schema-version-maintenance).
 - Drafts and unsent messages no longer count as contact in last contact and cadence.
 - Vector search, daemon status, and Explore coverage now say to restart when a rebuild activated settings changed after the daemon started.
 - Builds use Go 1.27.3, so IMAP connections reject the compromised intermediate certificates listed in [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809).
+- MCP [`stage_deletion`](https://msgvault.io/docs/usage/chat/#staged-deletion-via-mcp) stages every eligible query match through local or remote daemons, with skipped counts and a 100,000-match limit, instead of stopping at 500 metadata or 100 full-text matches.
 - On Windows, a keyed daemon's first start no longer fails with `provider credential DACL permits inherited access` when a client is polling at the same moment.
 - On Windows, private folders such as token, export and spool folders are created owner-only from the start. If Windows rejects those permissions, the folder is restricted right after creation, with a warning logged if that also fails. If creating one fails, the error names the folder's absolute path.
 - Invalid PDF diagnostics now report `PDF structure could not be validated`.

@@ -34,6 +34,29 @@ refuses `msgvault update` and points at `brew upgrade msgvault`. It adds the
 `duckdb_use_lib` tag, which links a system `libduckdb`; set `CGO_LDFLAGS` (and
 `CGO_CFLAGS` for headers) when that library is outside the default search path.
 
+### Share the Go build cache across worktrees
+
+Make targets compile Go with `-trimpath`, so binaries record module-relative
+source paths instead of absolute ones. Without it, Go caches every package
+separately for each checkout directory, and each git worktree grows the build
+cache by another full copy. With it, identical source in any checkout reuses
+the same cache entries.
+
+- Run `make <target> GOFLAGS=-trimpath=false` to opt out for one command.
+- Plain `go` commands outside Make do not add the flag. Run
+  `go env -w GOFLAGS=-trimpath` to make it your default; Make keeps any value
+  saved that way.
+
+Debuggers need a source mapping for trimmed binaries:
+
+- `dlv debug` and `dlv test` inherit `GOFLAGS` and cannot find source files.
+  Pass `--build-flags=-trimpath=false`. Debug builds disable optimizations, so
+  they never shared cache entries anyway.
+- For `dlv exec` or `dlv attach` on a trimmed binary, start Delve from the
+  repository root and run `config substitute-path -guess` (Delve 1.24 or
+  later). It maps the module path to your checkout, the standard library to
+  `GOROOT`, and dependencies to the module cache.
+
 ### Windows
 
 Use the PowerShell helper from the repository root to compile the Go binary.
@@ -448,6 +471,15 @@ archive schema changes, including indexes, or a required data migration changes.
 Embedded readers require an exact version match. Once an archive is migrated to
 a higher version, applications using an older `pkg/archive` must upgrade too,
 even if the schema change only added an index.
+
+Version 14 is the upstream Inline service seed. Version 15 retains that seed
+and adds the partial index for intentional Gmail local deletions. Setup upgrades
+both official version-14 archives and the earlier experimental version-14 variant
+that had the index without Inline. It checks the migration ledger and index
+independently; the version number alone does not identify the old variant.
+The upgrade tests verify each historical schema fingerprint before setup and
+check both features afterward. No table rebuild or data deletion is needed.
+Readers of either version-14 variant must run setup before using version 15.
 
 Filename suggestions require archive schema version 6 and API schema 3.15,
 newer than the latest release. Version 6 creates empty projection tables;
