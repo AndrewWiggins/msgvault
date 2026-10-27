@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-01"
+last_edited: "2026-10-27"
 title: Architecture Overview
 description: How msgvault captures communications, preserves the archive, and serves people, search, and automation.
 ---
@@ -150,6 +150,37 @@ while retaining archived messages and attachment content. Local commands such
 as `gc` and `delete-deduped` can remove archive data and have separate
 confirmation and backup rules. See [deletion](../usage/deletion.md) and
 [deduplication](../usage/deduplication.md).
+
+### Gmail acquisition failures survive sync progress
+
+Gmail fetch and ingestion failures remain acquisition debt until a later sync
+acquires the raw MIME or records a deletion disposition. The append-only
+`sync_run_items` journal identifies each occurrence by source and native Gmail
+message ID. Replay reads all source runs, including failed and full runs;
+finishing a newer run does not erase earlier failures.
+
+| Journal outcome | Effect on automatic acquisition |
+|---|---|
+| Fetch or ingestion failure, including a historical `gmail_not_found` skip | Retry on a later eligible sync; a generic HTTP 404 is ambiguous. |
+| `acquisition_resolved` | Acquired while the RAW remains present. Accidental RAW loss makes the debt retryable again. |
+| `message_gone` | The fetch explicitly confirmed disappearance; stop replay unless later acquisition events reopen the debt. |
+| `acquisition_source_deleted` | History or a complete, valid, unfiltered and unlimited presence inventory confirmed absence; stop replay unless later acquisition events reopen the debt. No archived message row is required. |
+| `acquisition_local_deletion` | Explicit local destruction prevents automatic reacquisition of that source/native ID, even after later failures, resolutions or remote events. |
+
+Deletion dispositions retain the original diagnostics. Local intent takes
+precedence over every later outcome. Resolution is recorded only if the RAW
+still exists and no local deletion has committed. Store checks and writes in
+one transaction, using the existing identity locks on PostgreSQL and SQLite's
+writer serialization to coordinate with acquisition and purge across processes.
+Purge holds the exclusive identity gate, so it can delay other archive writes;
+network fetches hold no such gate.
+
+Ordinary sync may advance its cursor past a failed acquisition only after the
+diagnostic is durable. Failure to record an outcome blocks the next checkpoint
+or final cursor publication. Each eligible sync makes one replay attempt per
+outstanding ID; there is no automatic retry ceiling. A physical deletion made
+before these dispositions existed cannot be distinguished from accidental loss
+and remains retryable if an old failure is recorded.
 
 ## Read further
 

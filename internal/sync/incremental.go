@@ -234,9 +234,9 @@ func (s *Syncer) incremental(
 					for i, fetch := range rawMessages {
 						raw := fetch.Message
 						if raw == nil {
-							if isMessageGone(fetch.Err) {
+							if kind, gone := messageGoneKind(fetch.Err); gone {
 								s.logger.Debug("skipping message deleted before fetch", "id", newMsgIDs[i])
-								s.recordSyncItem(syncID, newMsgIDs[i], syncItemPhaseFetch, store.SyncRunItemStatusSkipped, syncItemKindGmailNotFound, fetch.Err)
+								s.recordSyncItem(syncID, newMsgIDs[i], syncItemPhaseFetch, store.SyncRunItemStatusSkipped, kind, fetch.Err)
 								continue
 							}
 							errMsg := syncItemErrorMessage(fetch.Err, errRawBatchMissing.Error())
@@ -510,8 +510,8 @@ func (s *Syncer) handleLabelChange(ctx context.Context, syncID, sourceID int64, 
 			checkpoint.MessagesProcessed++
 			raw, err := s.client.GetMessageRaw(ctx, messageID)
 			if err != nil {
-				if isMessageGone(err) {
-					s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusSkipped, syncItemKindGmailNotFound, err)
+				if kind, gone := messageGoneKind(err); gone {
+					s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusSkipped, kind, err)
 					return false, false, err
 				}
 				s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusError, syncItemKindFetchError, err)
