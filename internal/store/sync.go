@@ -1030,6 +1030,13 @@ func acquisitionLocallyDeletedWith(q querier, sourceID int64, nativeID string) (
 	return deleted, nil
 }
 
+const acquisitionLocalDeletionIndexName = "idx_sync_run_items_local_deletion"
+
+// Native IDs are selective but only source-scoped. Keep the run ID in the
+// partial index to verify source ownership without scanning unrelated outcomes.
+const acquisitionLocalDeletionIndexDefinition = `ON sync_run_items(source_message_id, sync_run_id)
+	WHERE phase='fetch' AND status='skipped' AND error_kind='acquisition_local_deletion'`
+
 // recordAcquisitionReplayDispositionWith appends a lifecycle event only for a
 // Gmail ID with an existing acquisition history. Non-Gmail sources, untracked
 // IDs and an already-current disposition return nil without inserting a row.

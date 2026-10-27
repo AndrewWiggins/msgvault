@@ -177,9 +177,11 @@ network fetches hold no such gate.
 
 Ordinary sync may advance its cursor past a failed acquisition only after the
 diagnostic is durable. Failure to record an outcome blocks the next checkpoint
-or final cursor publication. Each eligible sync makes one replay attempt per
-outstanding ID; there is no automatic retry ceiling. A physical deletion made
-before these dispositions existed cannot be distinguished from accidental loss
+or final cursor publication. A failed source-deletion transaction also stops the
+run: its `delete_error` diagnostic is not replayable acquisition debt.
+Each eligible sync makes one replay attempt per outstanding ID; there is no
+automatic retry ceiling. A physical deletion made before these dispositions
+existed cannot be distinguished from accidental loss
 and remains retryable if an old failure is recorded.
 
 ## Read further

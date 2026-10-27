@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-21"
+last_edited: "2026-10-27"
 title: Changelog
 description: Release history for msgvault
 ---
@@ -16,6 +16,14 @@ All notable changes to msgvault, grouped by release.
   explicit unfiltered, unlimited `sync-full` to discover older messages omitted
   by earlier full syncs; that backfill can increase Gmail API use, transfer, and
   local storage. Incremental sync does not backfill old omissions by itself.
+- Gmail sync retains its History cursor when a source-deletion transaction fails,
+  including when its acquisition disposition cannot be recorded. A later sync
+  retries the deletion instead of losing it behind an advanced cursor.
+- Archive schema version 14 adds a partial index for intentional Gmail local
+  deletions, avoiding repeated journal scans during acquisition. Existing
+  archives build it during setup; PostgreSQL builds it concurrently. Embedded
+  readers must support version 14 after the upgrade, even though table layouts
+  are unchanged. See [schema version maintenance](development.md#archive-schema-version-maintenance).
 - Drafts and unsent messages no longer count as contact in last contact and cadence.
 - Drafts and unsent messages no longer count as contact in relationship temperature, the relationship calendar, the relationships list, person and domain timelines, or chat inbox summaries. Full cache checks at startup, after syncs, and during explicit cache builds detect sent-state changes; automatic refreshes respect the configured minimum rebuild interval. Analytics cache schema 33 triggers a one-time rebuild on upgrade without re-importing messages.
 - Vector search, daemon status, and Explore coverage now say to restart when a rebuild activated settings changed after the daemon started.

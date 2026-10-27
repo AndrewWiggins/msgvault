@@ -322,6 +322,11 @@ func (s *Syncer) incrementalWithRecovery(
 						s.recordSyncItem(syncID, id, syncItemPhaseDelete, store.SyncRunItemStatusError, syncItemKindDeleteError, err)
 					}
 					checkpoint.ErrorsCount += int64(len(deletedIDs))
+					// Delete diagnostics are not replayable acquisition debt. The
+					// rolled-back tombstones and dispositions must be retried from
+					// the old History cursor, before checkpointing past this page.
+					s.failStoppedSync(syncID, err)
+					return nil, fmt.Errorf("persist Gmail source deletions: %w", err)
 				}
 			}
 
@@ -371,9 +376,8 @@ func (s *Syncer) incrementalWithRecovery(
 		s.drainIdentityDiscoveryBacklog(ctx, source.ID)
 	}
 
-	// Advance past item errors, including during recovery catch-up, so one
-	// permanently failing message cannot block the source. Failed fetches carry
-	// forward to the next incremental run.
+	// Acquisition failures remain replayable in the durable journal, so they
+	// need not block cursor advancement. Unpersisted deletions fail above.
 	historyIDStr := strconv.FormatUint(profile.HistoryID, 10)
 	if checkpoint.ErrorsCount > 0 {
 		s.logger.Warn("incremental sync completed with errors",
