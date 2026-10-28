@@ -116,10 +116,10 @@ func (s *Syncer) getMessagesRawBatchWithIdentityValidation(
 	return results, nil
 }
 
-// pendingFetchReplayIDs returns the Gmail messages whose latest fetch or ingest
-// outcome since the latest completed incremental run is an error.
-func (s *Syncer) pendingFetchReplayIDs(sourceID int64) ([]string, error) {
-	items, err := s.store.ListUnresolvedSyncItemErrors(context.Background(), sourceID)
+// pendingAcquisitionReplayIDs returns the Gmail messages whose latest fetch or
+// ingest outcome since the latest completed incremental run is an error.
+func (s *Syncer) pendingAcquisitionReplayIDs(ctx context.Context, sourceID int64) ([]string, error) {
+	items, err := s.store.ListUnresolvedSyncItemErrors(ctx, sourceID)
 	if err != nil {
 		return nil, fmt.Errorf("list unresolved acquisition errors: %w", err)
 	}
@@ -136,8 +136,8 @@ func (s *Syncer) pendingFetchReplayIDs(sourceID int64) ([]string, error) {
 }
 
 // initAcquisitionReplay snapshots earlier failures for this run.
-func (s *Syncer) initAcquisitionReplay(sourceID, syncID int64) error {
-	ids, err := s.pendingFetchReplayIDs(sourceID)
+func (s *Syncer) initAcquisitionReplay(ctx context.Context, sourceID, syncID int64) error {
+	ids, err := s.pendingAcquisitionReplayIDs(ctx, sourceID)
 	if err != nil {
 		return err
 	}

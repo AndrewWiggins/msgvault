@@ -59,9 +59,9 @@ func (s *Syncer) incrementalWithRecovery(
 	}
 
 	// Read pending debt before creating a run so a read error leaves no failed run.
-	pendingReplayIDs, err := s.pendingFetchReplayIDs(source.ID)
+	pendingReplayIDs, err := s.pendingAcquisitionReplayIDs(ctx, source.ID)
 	if err != nil {
-		return nil, fmt.Errorf("find pending fetch replays: %w", err)
+		return nil, fmt.Errorf("find pending acquisition replays: %w", err)
 	}
 
 	var predecessorID int64
@@ -172,7 +172,7 @@ func (s *Syncer) incrementalWithRecovery(
 	// Retry earlier acquisition failures inside this scoped run, before history
 	// selection, so an idle mailbox still works off its durable debt.
 	if len(pendingReplayIDs) > 0 {
-		replayedIDs, err := s.replayFetchFailures(
+		replayedIDs, err := s.replayAcquisitionFailures(
 			ctx, syncID, source.ID, pendingReplayIDs, labelMap, checkpoint, summary,
 		)
 		if err != nil {
@@ -397,10 +397,10 @@ func (s *Syncer) incrementalWithRecovery(
 	return summary, nil
 }
 
-// replayFetchFailures retries earlier acquisition failures, skipping IDs that
+// replayAcquisitionFailures retries earlier acquisition failures, skipping IDs that
 // already reached the archive. It fetches and ingests locally; repeated failures
 // remain eligible for the next run.
-func (s *Syncer) replayFetchFailures(
+func (s *Syncer) replayAcquisitionFailures(
 	ctx context.Context,
 	syncID, sourceID int64,
 	messageIDs []string,
