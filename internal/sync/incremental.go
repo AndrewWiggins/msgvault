@@ -366,7 +366,9 @@ func (s *Syncer) replayFetchFailures(
 		if _, ok := existing[messageID]; !ok {
 			fetchIDs = append(fetchIDs, messageID)
 		} else {
-			s.resolveAcquisition(messageID)
+			if err := s.resolveAcquisition(messageID); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if len(fetchIDs) == 0 {
