@@ -1003,17 +1003,9 @@ func (s *Store) ListSyncRunItemsContext(ctx context.Context, syncRunID int64, st
 	return scanSyncRunItems(rows)
 }
 
-// ListUnresolvedSyncItemErrors returns the latest acquisition outcome for each
-// source message in phases, keeping only errors across all of the source's runs.
-func (s *Store) ListUnresolvedSyncItemErrors(ctx context.Context, sourceID int64, phases []string) ([]SyncRunItem, error) {
-	if len(phases) == 0 {
-		return nil, nil
-	}
-	args := []any{sourceID}
-	for _, phase := range phases {
-		args = append(args, phase)
-	}
-	args = append(args, SyncRunItemStatusError)
+// ListUnresolvedSyncItemErrors returns the latest fetch or ingest outcome for
+// each source message, keeping only errors across all of the source's runs.
+func (s *Store) ListUnresolvedSyncItemErrors(ctx context.Context, sourceID int64) ([]SyncRunItem, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, sync_run_id, source_message_id, phase, status,
 		       error_kind, error_message, created_at
@@ -1022,11 +1014,11 @@ func (s *Store) ListUnresolvedSyncItemErrors(ctx context.Context, sourceID int64
 			SELECT MAX(i.id)
 			FROM sync_run_items i
 			JOIN sync_runs r ON r.id = i.sync_run_id
-			WHERE r.source_id = ? AND i.phase IN (`+placeholders(len(phases))+`)
+			WHERE r.source_id = ? AND i.phase IN ('fetch', 'ingest')
 			GROUP BY i.source_message_id
 		) AND status = ?
 		ORDER BY id
-	`, args...)
+	`, sourceID, SyncRunItemStatusError)
 	if err != nil {
 		return nil, fmt.Errorf("list unresolved sync item errors: %w", err)
 	}
