@@ -482,8 +482,13 @@ check both features afterward. No table rebuild or data deletion is needed.
 The archive owner must complete version-15 setup before either variant can be
 opened by version-15 readers. Embedded applications must upgrade their archive
 library too; runtime readers never migrate. PostgreSQL builds the index
-concurrently on populated archives; failed maintenance builds retry on later
-setup runs under the existing best-effort policy.
+concurrently on populated archives. SQLite's inline DDL and PostgreSQL's
+fresh-schema build are required; an existing PostgreSQL archive uses the
+existing best-effort maintenance policy.
+A failed concurrent build is logged and retried on later setup runs, so the
+version marker alone does not certify this index's presence or validity.
+The local-deletion guard remains correct without the index but can scan the
+journal. Runtime readers do not repair it; rerun setup to retry the build.
 
 Filename suggestions require archive schema version 6 and API schema 3.15,
 newer than the latest release. Version 6 creates empty projection tables;
@@ -548,9 +553,10 @@ SQLite reports `EXPLAIN QUERY PLAN`. Go's SQLite test store disables durability;
 these local synthetic timings compare query and transaction work, not production
 disk durability or a latency guarantee. Include small requests and GC costs when
 comparing changes: a faster historical lookup alone need not speed up the full
-operation. The two `acquisition_lookup*_test.go` files can be carried to an older
-revision to compare its unchanged production paths with the same fixture and
-measurement code.
+operation. The fixture in `acquisition_lookup_performance_test.go` and its
+tracing helpers in `acquisition_lookup_test.go` can be carried to an older
+revision to compare its unchanged production paths with the same measurement
+code.
 
 The ordinary `TestAcquisitionLifecycle` tests verify one history traversal per
 source, request-bounded results, write-chunk duplicates, source isolation and
@@ -579,9 +585,11 @@ The lifecycle predicates and transaction boundaries are shared and unchanged.
 
 `TestAcquisitionLifecyclePostgresStatistics` runs ordinary native PostgreSQL
 regressions with absent, current and stale statistics (the stale sample contains
-only unrelated phases before the journal grows). It checks actual JSON function
-loops and hashed membership for custom and generic prepared plans, plus complete
-deletion results, duplicate IDs and source isolation. A test-only table lock
+only unrelated phases before the journal grows). It checks actual request
+traversals for custom and generic prepared plans, including any materialized
+request scans, plus complete deletion results, duplicate IDs and source isolation.
+It accepts different join shapes and does not require a rendered subplan label.
+A test-only table lock
 prevents automatic ANALYZE from changing the fixture; production requires no
 ANALYZE, planner setting, temporary table or connection-management change.
 The opt-in mode increases each source to 50,000 events and requests up to 100,000
