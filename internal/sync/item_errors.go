@@ -134,13 +134,13 @@ func (s *Syncer) pendingFetchReplayIDs(sourceID int64) ([]string, error) {
 }
 
 // initAcquisitionReplay snapshots earlier failures for this run.
-func (s *Syncer) initAcquisitionReplay(sourceID, syncID int64) ([]string, error) {
+func (s *Syncer) initAcquisitionReplay(sourceID, syncID int64) error {
 	ids, err := s.pendingFetchReplayIDs(sourceID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	s.setAcquisitionReplay(syncID, ids)
-	return ids, nil
+	return nil
 }
 
 func (s *Syncer) setAcquisitionReplay(syncID int64, ids []string) {
@@ -187,7 +187,7 @@ func syncItemErrorMessage(err error, fallback string) string {
 }
 
 func (s *Syncer) recordSyncItem(syncID int64, sourceMessageID, phase, status, kind string, err error) {
-	if syncID == s.acquisitionSyncID && status == store.SyncRunItemStatusError &&
+	if s.pendingAcquisitions != nil && syncID == s.acquisitionSyncID && status == store.SyncRunItemStatusError &&
 		isAcquisitionReplayCandidate(store.SyncRunItem{SourceMessageID: sourceMessageID, Phase: phase, ErrorKind: kind}) {
 		s.pendingAcquisitions[sourceMessageID] = struct{}{}
 	}

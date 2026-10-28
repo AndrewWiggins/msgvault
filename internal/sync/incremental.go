@@ -412,7 +412,7 @@ func (s *Syncer) replayFetchFailures(
 		return nil, nil
 	}
 
-	existing, err := s.store.MessageExistsWithRawBatchContext(ctx, sourceID, messageIDs)
+	existing, err := s.store.MessageExistsBatchContext(ctx, sourceID, messageIDs)
 	if err != nil {
 		return nil, fmt.Errorf("check replay messages: %w", err)
 	}
@@ -426,10 +426,6 @@ func (s *Syncer) replayFetchFailures(
 	}
 	if len(fetchIDs) == 0 {
 		return nil, nil
-	}
-	metadata, err := s.store.MessageExistsBatchContext(ctx, sourceID, fetchIDs)
-	if err != nil {
-		return nil, fmt.Errorf("check replay message metadata: %w", err)
 	}
 
 	batchSize := 10
@@ -485,11 +481,7 @@ func (s *Syncer) replayFetchFailures(
 				checkpoint.ErrorsCount++
 				continue
 			}
-			if _, exists := metadata[messageID]; exists {
-				checkpoint.MessagesUpdated++
-			} else {
-				checkpoint.MessagesAdded++
-			}
+			checkpoint.MessagesAdded++
 			summary.BytesDownloaded += int64(len(result.Message.Raw))
 			successfulIDs = append(successfulIDs, messageID)
 		}

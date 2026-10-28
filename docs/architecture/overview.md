@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-28"
+last_edited: "2026-10-01"
 title: Architecture Overview
 description: How msgvault captures communications, preserves the archive, and serves people, search, and automation.
 ---
