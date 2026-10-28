@@ -8,7 +8,7 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
-- Each Gmail incremental sync retries messages earlier syncs couldn't download or save, until they're archived or Gmail reports them gone, but skips failures recorded before the source's latest completed incremental run. Run a full sync to recover those older failures; a source with no completed incremental run retries every recorded failure on its first incremental sync.
+- Each Gmail incremental sync retries messages earlier syncs couldn't download or save, until they're archived or Gmail reports them gone. Failures recorded before upgrading and before the source's latest completed incremental sync aren't retried; run a full sync to recover them. A source with no completed incremental sync retries every recorded failure on its first incremental sync after upgrading.
 - Media search in Everything, `msgvault media search`, the HTTP API, and MCP now finds text Docbank has extracted from mirrored attachments. A scope with more than 4096 mirrored files excluding images, audio, and video returns `media_search_scope_limit` in `attachments.error`; add a Person filter to narrow the search.
 - Drafts and unsent messages no longer count as contact in last contact and cadence.
 - Vector search, daemon status, and Explore coverage now say to restart when a rebuild activated settings changed after the daemon started.

@@ -1012,7 +1012,7 @@ func (s *Store) ListSyncRunItemsContext(ctx context.Context, syncRunID int64, st
 // errors. That run supersedes older debt by recording anything still failing.
 func (s *Store) ListUnresolvedSyncItemErrors(ctx context.Context, sourceID int64) ([]SyncRunItem, error) {
 	var lowerBound int64
-	last, err := s.GetLastSuccessfulSyncByType(sourceID, "incremental")
+	last, err := s.getLastSuccessfulSyncContext(ctx, sourceID, "incremental", true)
 	if err != nil && !errors.Is(err, ErrSyncRunNotFound) {
 		return nil, fmt.Errorf("find latest completed incremental: %w", err)
 	}
