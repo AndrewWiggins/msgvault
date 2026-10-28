@@ -553,10 +553,48 @@ replay concurrency tests exercise acquisition and intentional local deletion.
 The lookup does not load the complete journal into Go. Its result map contains
 only requested tracked native IDs; GC's maps are bounded by the revalidated plan
 and its candidate reads remain in pages of 500. PostgreSQL also constructs an
-array of that source's run IDs. SQL aggregation can use temporary sort/hash
-storage for matching historical events; it is still a history scan, not a direct
-native-ID lookup. All request state is local to the transaction and is discarded
-on failure. No additional archive index or schema migration is required.
+array of that source's run IDs. Provider requests copy, sort and compact native
+IDs before JSON serialization without changing the caller's order or the write
+chunks. This adds a slice of string headers proportional to the input size and
+sorting work, but duplicate identities enter the JSON request only once. The
+benchmark below isolates this preparation cost, including unique requests.
+
+PostgreSQL keeps request membership inside
+`(candidate.source_message_id IN (...)) IS TRUE`. This preserves
+the filter's truth conditions while preventing conversion into a semi-join
+that can repeatedly scan the JSON request when event counts are underestimated.
+An uncorrelated hashed subplan reads the request once per participating worker.
+Each retained `MAX(id)` is then fetched through a scalar primary-key lookup;
+an outer join can otherwise scan the whole journal after membership selectivity
+is overestimated. SQLite retains its indexed source/run traversal and `IN` set.
+The lifecycle predicates and transaction boundaries are shared and unchanged.
+
+`TestAcquisitionLifecyclePostgresStatistics` runs ordinary native PostgreSQL
+regressions with absent, current and stale statistics (the stale sample contains
+only unrelated phases before the journal grows). It checks actual JSON function
+loops and hashed membership for custom and generic prepared plans, plus complete
+deletion results, duplicate IDs and source isolation. A test-only table lock
+prevents automatic ANALYZE from changing the fixture; production requires no
+ANALYZE, planner setting, temporary table or connection-management change.
+The opt-in mode increases each source to 50,000 events and requests up to 100,000
+IDs, reporting three complete API times and EXPLAIN ANALYZE/BUFFERS plans:
+
+```sh
+MSGVAULT_TEST_ACQUISITION_PERF=1 go test -tags 'fts5 sqlite_vec' ./internal/store \
+  -run '^TestAcquisitionLifecyclePostgresStatistics$' -count=1 -v
+go test -tags 'fts5 sqlite_vec' ./internal/store -run '^$' \
+  -bench '^BenchmarkAcquisitionReplayRequestJSON$' -benchmem
+```
+
+SQL aggregation can use temporary sort/hash storage for matching historical
+events; it is still a history scan, not a direct native-ID lookup. PostgreSQL's
+hashed membership keeps the distinct request in server memory, potentially once
+per worker, and does not spill that hash to disk. Neither Go nor server memory
+has a constant 500-ID bound: the input, JSON, request hash and result maps grow
+with the operation. No complete journal cache is added to Go. All request state
+is local to the transaction and is discarded on failure. No archive index or
+schema migration is added; schema 15's partial local-deletion index still serves
+the separate intentional-deletion guard during persistence and resolution.
 
 ## SQL Guidelines
 
