@@ -1028,8 +1028,17 @@ func (s *Store) ListSyncRunItemsContext(ctx context.Context, syncRunID int64, st
 }
 
 // ListUnresolvedSyncItemErrors returns the latest fetch or ingest outcome for
-// each source message, keeping only errors across all of the source's runs.
+// each source message since the latest completed incremental run, keeping only
+// errors. That run supersedes older debt by recording anything still failing.
 func (s *Store) ListUnresolvedSyncItemErrors(ctx context.Context, sourceID int64) ([]SyncRunItem, error) {
+	var lowerBound int64
+	last, err := s.GetLastSuccessfulSyncByType(sourceID, "incremental")
+	if err != nil && !errors.Is(err, ErrSyncRunNotFound) {
+		return nil, fmt.Errorf("find latest completed incremental: %w", err)
+	}
+	if last != nil {
+		lowerBound = last.ID
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, sync_run_id, source_message_id, phase, status,
 		       error_kind, error_message, created_at
@@ -1038,11 +1047,11 @@ func (s *Store) ListUnresolvedSyncItemErrors(ctx context.Context, sourceID int64
 			SELECT MAX(i.id)
 			FROM sync_run_items i
 			JOIN sync_runs r ON r.id = i.sync_run_id
-			WHERE r.source_id = ? AND i.phase IN ('fetch', 'ingest')
+			WHERE r.source_id = ? AND r.id >= ? AND i.phase IN ('fetch', 'ingest')
 			GROUP BY i.source_message_id
 		) AND status = ?
 		ORDER BY id
-	`, sourceID, SyncRunItemStatusError)
+	`, sourceID, lowerBound, SyncRunItemStatusError)
 	if err != nil {
 		return nil, fmt.Errorf("list unresolved sync item errors: %w", err)
 	}

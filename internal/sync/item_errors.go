@@ -133,19 +133,22 @@ func (s *Syncer) pendingFetchReplayIDs(sourceID int64) ([]string, error) {
 	return ids, nil
 }
 
-// initAcquisitionReplay snapshots earlier failures for this run. Ordinary ingest
-// and replay both settle only IDs in this set.
+// initAcquisitionReplay snapshots earlier failures for this run.
 func (s *Syncer) initAcquisitionReplay(sourceID, syncID int64) ([]string, error) {
 	ids, err := s.pendingFetchReplayIDs(sourceID)
 	if err != nil {
 		return nil, err
 	}
+	s.setAcquisitionReplay(syncID, ids)
+	return ids, nil
+}
+
+func (s *Syncer) setAcquisitionReplay(syncID int64, ids []string) {
 	s.acquisitionSyncID = syncID
 	s.pendingAcquisitions = make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		s.pendingAcquisitions[id] = struct{}{}
 	}
-	return ids, nil
 }
 
 func (s *Syncer) resolveAcquisition(messageID string) {
@@ -184,6 +187,10 @@ func syncItemErrorMessage(err error, fallback string) string {
 }
 
 func (s *Syncer) recordSyncItem(syncID int64, sourceMessageID, phase, status, kind string, err error) {
+	if syncID == s.acquisitionSyncID && status == store.SyncRunItemStatusError &&
+		isAcquisitionReplayCandidate(store.SyncRunItem{SourceMessageID: sourceMessageID, Phase: phase, ErrorKind: kind}) {
+		s.pendingAcquisitions[sourceMessageID] = struct{}{}
+	}
 	if sourceMessageID == "" {
 		sourceMessageID = "(unknown)"
 	}
