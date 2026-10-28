@@ -956,7 +956,11 @@ func (s *Store) RecordSyncRunItem(item SyncRunItem) error {
 
 // RecordSyncRunItemContext honors cancellation during RecordSyncRunItem.
 func (s *Store) RecordSyncRunItemContext(ctx context.Context, item SyncRunItem) error {
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+	return s.recordSyncRunItemWith(ctx, s.db, item)
+}
+
+func (s *Store) recordSyncRunItemWith(ctx context.Context, q contextQuerier, item SyncRunItem) error {
+	_, err := q.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO sync_run_items (
 			sync_run_id, source_message_id, phase, status,
 			error_kind, error_message, created_at

@@ -153,11 +153,28 @@ func (s *Syncer) setAcquisitionReplay(syncID int64, ids []string) {
 	}
 }
 
-func (s *Syncer) resolveAcquisition(messageID string) {
-	if _, pending := s.pendingAcquisitions[messageID]; pending {
-		s.recordSyncItem(s.acquisitionSyncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusResolved, syncItemKindAcquired, nil)
+func (s *Syncer) acquisitionResolution(messageID string) *store.SyncRunItem {
+	if _, pending := s.pendingAcquisitions[messageID]; !pending {
+		return nil
+	}
+	return &store.SyncRunItem{
+		SyncRunID:       s.acquisitionSyncID,
+		SourceMessageID: messageID,
+		Phase:           syncItemPhaseFetch,
+		Status:          store.SyncRunItemStatusResolved,
+		ErrorKind:       syncItemKindAcquired,
+		ErrorMessage:    syncItemKindAcquired,
+	}
+}
+
+func (s *Syncer) resolveAcquisition(messageID string) error {
+	if item := s.acquisitionResolution(messageID); item != nil {
+		if err := s.store.RecordSyncRunItem(*item); err != nil {
+			return fmt.Errorf("resolve acquisition %q: %w", messageID, err)
+		}
 		delete(s.pendingAcquisitions, messageID)
 	}
+	return nil
 }
 
 func isGmailNotFound(err error) bool {

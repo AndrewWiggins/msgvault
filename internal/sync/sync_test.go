@@ -5923,6 +5923,80 @@ func TestIncrementalSyncReplaysEarlierRunFailures(t *testing.T) {
 	assert.Empty(env.Mock.GetMessageCalls)
 }
 
+func TestIncrementalSyncDoesNotReplayPurgedAcquisition(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	env := newTestEnv(t)
+	source := seedReplaySource(t, env, "recovered")
+	seedMessages(env, 2, 1001, "keep", "recovered")
+	env.Mock.MessagePages = [][]string{{"keep", "recovered"}}
+
+	// A failed resolution must roll back the recovered message as well.
+	_, err := env.Store.DB().Exec(`
+		CREATE TRIGGER fail_acquisition_resolution BEFORE INSERT ON sync_run_items
+		WHEN NEW.source_message_id = 'recovered' AND NEW.status = 'resolved'
+		  AND NEW.error_kind = 'acquired'
+		BEGIN
+			SELECT RAISE(ABORT, 'synthetic acquisition resolution failure');
+		END
+	`)
+	require.NoError(err)
+	summary := runFullSync(t, env)
+	existing, err := env.Store.MessageExistsBatch(source.ID, []string{"recovered"})
+	require.NoError(err)
+	require.Empty(existing, "a recovered message must not commit without its resolution")
+	require.Equal(int64(1), summary.Errors)
+	_, err = env.Store.DB().Exec(`DROP TRIGGER fail_acquisition_resolution`)
+	require.NoError(err)
+
+	summary = runFullSync(t, env)
+	require.Zero(summary.Errors)
+	ids, err := env.Store.MessageExistsBatch(source.ID, []string{"keep", "recovered"})
+	require.NoError(err)
+	require.Len(ids, 2)
+	var resolutions int
+	require.NoError(env.Store.DB().QueryRow(`
+		SELECT COUNT(*) FROM sync_run_items
+		WHERE source_message_id = 'recovered' AND status = 'resolved'
+	`).Scan(&resolutions))
+	require.Equal(1, resolutions)
+
+	var sequence int
+	var database, dbPath string
+	require.NoError(env.Store.DB().QueryRow(`PRAGMA database_list`).Scan(&sequence, &database, &dbPath))
+	require.NoError(env.Store.Close())
+	env.Store, err = store.Open(dbPath)
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(env.Store.Close()) })
+	env.Syncer = New(env.Mock, env.Store, nil)
+	raw, err := env.Store.GetMessageRaw(ids["recovered"])
+	require.NoError(err)
+	require.Equal(testMIME(), raw, "recovered RAW survives closing and reopening SQLite")
+
+	_, err = env.Store.MergeDuplicates(ids["keep"], []int64{ids["recovered"]}, "purge-replay")
+	require.NoError(err)
+	deleted, err := env.Store.DeleteDedupedBatch("purge-replay")
+	require.NoError(err)
+	require.Equal(int64(1), deleted)
+	existing, err = env.Store.MessageExistsBatch(source.ID, []string{"recovered"})
+	require.NoError(err)
+	require.Empty(existing, "the dedup purge removed the recovered occurrence")
+
+	// The provider has no new events; only unresolved acquisition debt could replay.
+	source, err = env.Store.GetSourceByID(source.ID)
+	require.NoError(err)
+	require.Equal("1001", source.SyncCursor.String)
+	env.SetHistory(1001)
+	calls := len(env.Mock.GetMessageCalls)
+	_, err = env.Syncer.Incremental(env.Context, source)
+	require.NoError(err)
+	existing, err = env.Store.MessageExistsBatch(source.ID, []string{"recovered"})
+	require.NoError(err)
+	assert.Empty(existing, "idle incremental sync must not recreate an intentionally purged message")
+	assert.Len(env.Mock.GetMessageCalls, calls, "purged acquisition debt must not trigger another download")
+}
+
 func TestIncrementalSyncDoesNotReacquirePurgedMessage(t *testing.T) {
 	for _, recovery := range []string{"full", "history", "replay"} {
 		t.Run(recovery, func(t *testing.T) {
