@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-27"
+last_edited: "2026-10-01"
 title: Architecture Overview
 description: How msgvault captures communications, preserves the archive, and serves people, search, and automation.
 ---
@@ -150,53 +150,6 @@ while retaining archived messages and attachment content. Local commands such
 as `gc` and `delete-deduped` can remove archive data and have separate
 confirmation and backup rules. See [deletion](../usage/deletion.md) and
 [deduplication](../usage/deduplication.md).
-
-### Gmail acquisition failures survive sync progress
-
-Gmail fetch and ingestion failures remain acquisition debt until a later sync
-acquires the raw MIME or records a deletion disposition. The append-only
-`sync_run_items` journal identifies each occurrence by source and native Gmail
-message ID. Replay reads all source runs, including failed and full runs;
-finishing a newer run does not erase earlier failures.
-
-| Journal outcome | Effect on automatic acquisition |
-|---|---|
-| Fetch or ingestion failure, including a historical `gmail_not_found` skip | Retry on a later eligible sync; a generic HTTP 404 is ambiguous. |
-| `acquisition_resolved` | Acquired while the RAW remains present. Accidental RAW loss makes the debt retryable again. |
-| `message_gone` | The fetch explicitly confirmed disappearance; stop replay unless later acquisition events reopen the debt. |
-| `acquisition_source_deleted` | History or a complete, valid, unfiltered and unlimited presence inventory confirmed absence; stop replay unless later acquisition events reopen the debt. No archived message row is required. |
-| `acquisition_local_deletion` | Explicit local destruction prevents automatic reacquisition of that source/native ID, even after later failures, resolutions or remote events. |
-
-Deletion dispositions retain the original diagnostics. Local intent takes
-precedence over every later outcome. Resolution is recorded only if the RAW
-still exists and no local deletion has committed. Store checks and writes in
-one transaction, using the existing identity locks on PostgreSQL and SQLite's
-writer serialization to coordinate with acquisition and purge across processes.
-Purge holds the exclusive identity gate, so it can delay other archive writes;
-network fetches hold no such gate.
-
-History and full sync reuse the replay snapshot to identify prior remote-deletion
-dispositions. A successful new acquisition writes its resolution in the RAW
-transaction. Failure to append that resolution rolls back the new RAW and leaves
-a durable ingestion failure for replay.
-
-For tracked Gmail IDs, provider deletion batches and SQLite GC read acquisition
-history for at most 500 native IDs per source at a time. They aggregate the latest
-events in SQL and append only changed dispositions in the same transaction as
-the tombstone or removal. This bounds the additional lifecycle lookup memory
-and avoids a separate history query for each deleted message. GC still validates
-its existing complete plan before removal; PostgreSQL archive GC remains
-unsupported.
-
-Ordinary sync may advance its cursor past a failed acquisition only after the
-diagnostic is durable. Failure to record an outcome prevents checkpoint or final
-cursor advancement past it. A failed source-deletion transaction also stops the
-run: its `delete_error` diagnostic is not replayable acquisition debt.
-Incremental replay attempts each pending ID once per run, even with no new
-History events. A full traversal settles only the debt it visits; filtered or
-limited traversals leave other debt pending. There is no automatic retry ceiling.
-A physical deletion made before these dispositions existed cannot be distinguished
-from accidental loss and remains retryable if an old failure is recorded.
 
 ## Read further
 

@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-27"
+last_edited: "2026-10-26"
 title: CLI Reference
 description: Complete command reference for all msgvault commands.
 ---
@@ -824,7 +824,7 @@ under [`sync`](#sync).
 
 ## sync
 
-Sync new and changed messages. Gmail accounts use the Gmail History API; IMAP accounts perform a mailbox scan and skip messages already in the database. The optional account can be an identifier or display name. When it is omitted, the command syncs all accounts that have completed an initial full sync.
+Sync new and changed messages. Gmail accounts use the Gmail History API; IMAP accounts perform a mailbox scan and skip messages already in the database. The optional account can be an identifier or display name. When it is omitted, the command syncs all accounts that have completed an initial full sync. Each Gmail incremental sync first retries messages an earlier sync couldn't download or save, until they're archived or Gmail reports them gone.
 
 ```bash
 msgvault sync [account] [flags]
@@ -3741,11 +3741,6 @@ SQLite database directly. The delete cannot be undone with `deduplicate --undo`;
 when backups are enabled, the daemon writes the backup next to the database it
 owns before deleting. Repeated `--batch` selections commit as one transaction;
 if the request is canceled, none of the selected batches are left half-deleted.
-
-For Gmail, both deletion modes durably record the intentional removal before
-destroying the rows. Automatic sync will not reacquire those source/native
-message IDs. Accidental RAW loss in a tracked acquisition remains repairable;
-see [Gmail acquisition debt](architecture/overview.md#gmail-acquisition-failures-survive-sync-progress).
 
 | Flag | Description |
 |---|---|

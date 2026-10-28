@@ -472,19 +472,6 @@ Embedded readers require an exact version match. Once an archive is migrated to
 a higher version, applications using an older `pkg/archive` must upgrade too,
 even if the schema change only added an index.
 
-Version 14 is the upstream Inline service seed. Version 15 retains that seed
-and adds the partial index for intentional Gmail local deletions. Setup upgrades
-both official version-14 archives and the earlier experimental version-14 variant
-that had the index without Inline. It checks the migration ledger and index
-independently; the version number alone does not identify the old variant.
-The upgrade tests verify each historical schema fingerprint before setup and
-check both features afterward. No table rebuild or data deletion is needed.
-The archive owner must complete version-15 setup before either variant can be
-opened by version-15 readers. Embedded applications must upgrade their archive
-library too; runtime readers never migrate. PostgreSQL builds the index
-concurrently on populated archives; failed maintenance builds retry on later
-setup runs under the existing best-effort policy.
-
 Filename suggestions require archive schema version 6 and API schema 3.15,
 newer than the latest release. Version 6 creates empty projection tables;
 background maintenance establishes readiness separately. Schema migration does

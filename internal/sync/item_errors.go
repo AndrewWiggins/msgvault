@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"go.kenn.io/msgvault/internal/gmail"
 	"go.kenn.io/msgvault/internal/store"
@@ -14,14 +15,24 @@ const (
 	syncItemPhaseIngest = "ingest"
 	syncItemPhaseDelete = "delete"
 
-	syncItemKindBatchFetchError     = "batch_fetch_error"
-	syncItemKindFetchError          = "fetch_error"
-	syncItemKindGmailNotFound       = "gmail_not_found"
-	syncItemKindMessageGone         = "message_gone"
-	syncItemKindIngestError         = "ingest_error"
-	syncItemKindDeleteError         = "delete_error"
-	syncItemKindAcquisitionResolved = store.AcquisitionReplayResolved
+	syncItemKindBatchFetchError = "batch_fetch_error"
+	syncItemKindFetchError      = "fetch_error"
+	syncItemKindGmailNotFound   = "gmail_not_found"
+	syncItemKindMessageGone     = "message_gone"
+	syncItemKindIngestError     = "ingest_error"
+	syncItemKindDeleteError     = "delete_error"
+	syncItemKindAcquired        = "acquired"
 )
+
+// isAcquisitionReplayCandidate reports whether a failed fetch or ingest names
+// a usable Gmail message ID.
+func isAcquisitionReplayCandidate(item store.SyncRunItem) bool {
+	return item.Status == store.SyncRunItemStatusError &&
+		((item.Phase == syncItemPhaseFetch &&
+			(item.ErrorKind == syncItemKindFetchError || item.ErrorKind == syncItemKindBatchFetchError)) ||
+			(item.Phase == syncItemPhaseIngest && item.ErrorKind == syncItemKindIngestError)) &&
+		item.SourceMessageID != "" && item.SourceMessageID != "(unknown)"
+}
 
 var errRawBatchMissing = errors.New("missing raw message in batch result")
 
@@ -106,31 +117,42 @@ func (s *Syncer) getMessagesRawBatchWithIdentityValidation(
 	return results, nil
 }
 
-// pendingFetchReplayState includes ingestion and full-run failures and the
-// remote-deletion dispositions which a later durable acquisition may reopen.
-// Neither a newer run nor a bounded full traversal can erase another run's debt.
-func (s *Syncer) pendingFetchReplayState(sourceID int64) ([]string, []string, error) {
-	return s.store.AcquisitionReplayState(sourceID)
-}
-
-// requireRecordedSyncItems prevents a lost diagnostic from being passed by a
-// durable page checkpoint or source history cursor. The previous traversal can
-// then discover the failed acquisition again.
-func (s *Syncer) requireRecordedSyncItems(syncID int64) error {
-	if s.itemRecordError == nil {
-		return nil
+func (s *Syncer) pendingFetchReplayIDs(sourceID int64) ([]string, error) {
+	items, err := s.store.ListUnresolvedSyncItemErrors(context.Background(), sourceID, []string{syncItemPhaseFetch, syncItemPhaseIngest})
+	if err != nil {
+		return nil, fmt.Errorf("list unresolved acquisition errors: %w", err)
 	}
-	err := fmt.Errorf("persist acquisition diagnostics: %w", s.itemRecordError)
-	s.failStoppedSync(syncID, err)
-	return err
+
+	seen := make(map[string]struct{}, len(items))
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if !isAcquisitionReplayCandidate(item) {
+			continue
+		}
+		if _, ok := seen[item.SourceMessageID]; ok {
+			continue
+		}
+		seen[item.SourceMessageID] = struct{}{}
+		ids = append(ids, item.SourceMessageID)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
-// messageGoneKind reports whether the source explicitly confirmed that the
-// message disappeared between enumeration and fetch. A generic Gmail 404 only
-// proves that the API returned not found; it does not establish permanent
-// deletion, so it remains retryable acquisition debt.
+func isGmailNotFound(err error) bool {
+	var notFound *gmail.NotFoundError
+	return errors.As(err, &notFound)
+}
+
+// messageGoneKind reports whether the source no longer holds the message, and
+// the sync-item kind that records why. A Gmail 404 and an IMAP UID expunged
+// between enumeration and fetch mean the same thing to the run: the message was
+// handled, not failed. Both must be acknowledged, or the folder they belong to
+// never saves its high water mark.
 func messageGoneKind(err error) (string, bool) {
 	switch {
+	case isGmailNotFound(err):
+		return syncItemKindGmailNotFound, true
 	case errors.Is(err, gmail.ErrMessageGone):
 		return syncItemKindMessageGone, true
 	default:
@@ -158,7 +180,6 @@ func (s *Syncer) recordSyncItem(syncID int64, sourceMessageID, phase, status, ki
 		ErrorKind:       kind,
 		ErrorMessage:    errMsg,
 	}); recErr != nil {
-		s.itemRecordError = errors.Join(s.itemRecordError, recErr)
 		s.logger.Warn("failed to record sync item",
 			"sync_id", syncID,
 			"source_message_id", sourceMessageID,

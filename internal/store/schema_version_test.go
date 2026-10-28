@@ -215,7 +215,6 @@ var (
 		12: "77b6d3434f3091970112c2a27f20f8b9e940c0a71b5a16b280d552b3857412b5",
 		13: "c5ccb9e5b3659b94a2d66acfd0cf8ea323e70abb3000f3c5792c10ecf79f85b8",
 		14: "1092127cfc654d884f52634204dee6d04d5c4c9d966fe997263d064c871a21ee",
-		15: "3621eed2c939b59b7dbb32d4e2de119a2fd32abb3ad9e3ad68ed55afb8cba108",
 	}
 	schemaContractPostgresDigests = []string{
 		1:  "7c554ff06468af9bf30950e6e4f2954b52f84d7dd0e6708f4fdd932fda007ed3",
@@ -232,7 +231,6 @@ var (
 		12: "21a6d84fac2dd2c3c1d04d23e56e6fc977dfb4431a11beed75678274fbdf11b3",
 		13: "da8aa0a2023db284656a471e2640b80ec2be2a5d110136cb8e62f81739a384ac",
 		14: "00ca50153fc0f90dc588225b0ce9b9097caf71dc42a47e73e7d03f2bfc460a93",
-		15: "0129e2c2b4f38a474bea43157e4064376b388ad5863898c1f12a69d331894d26",
 	}
 )
 
@@ -320,11 +318,6 @@ func schemaContractDigest(t *testing.T) string {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	require.NoError(t, s.InitSchemaContext(context.Background()))
-	return schemaContractSQLiteDigest(t, s)
-}
-
-func schemaContractSQLiteDigest(t *testing.T, s *store.Store) string {
-	t.Helper()
 	var parts []string
 	for _, object := range queryStrings(t, s, `SELECT type || ' ' || name || ' ' || sql FROM sqlite_master
 		WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite!_%' ESCAPE '!' AND name NOT LIKE '%!_fts%' ESCAPE '!'
