@@ -181,12 +181,16 @@ transaction. Failure to append that resolution rolls back the new RAW and leaves
 a durable ingestion failure for replay.
 
 For tracked Gmail IDs, provider deletion batches and SQLite GC read acquisition
-history for at most 500 native IDs per source at a time. They aggregate the latest
-events in SQL and append only changed dispositions in the same transaction as
-the tombstone or removal. This bounds the additional lifecycle lookup memory
-and avoids a separate history query for each deleted message. GC still validates
-its existing complete plan before removal; PostgreSQL archive GC remains
-unsupported.
+history once per source in the deletion transaction. The existing run indexes
+select that source's events; SQL retains the latest event only for requested
+identities. Provider requests work even when no message row exists. Journal state
+is bounded by the deletion request, rather than all identities in the historical
+journal, and changed dispositions are still written in groups of at most 500.
+GC validates its existing complete plan before removal and reads candidate rows
+by primary key in pages of 500. Its history request uses the same eligibility
+predicate in that transaction, preserving managed drafts and other retained rows.
+It does not accumulate a second complete list of candidate rows. PostgreSQL
+archive GC remains unsupported. See the [reproducible lookup measurements](../development.md#gmail-lifecycle-lookup-measurements).
 
 Ordinary sync may advance its cursor past a failed acquisition only after the
 diagnostic is durable. Failure to record an outcome prevents checkpoint or final

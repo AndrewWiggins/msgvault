@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1045,25 +1046,39 @@ const acquisitionReplayLookupBatchSize = 500
 const acquisitionLocalDeletionIndexDefinition = `ON sync_run_items(source_message_id, sync_run_id)
 	WHERE phase='fetch' AND status='skipped' AND error_kind='acquisition_local_deletion'`
 
-// acquisitionReplayLatestKindsWith returns the latest journal outcome for the
-// requested native IDs with one grouped query per bounded chunk, rather than
-// issuing a separate history query for each ID.
-func (s *Store) acquisitionReplayLatestKindsWith(
-	ctx context.Context, q *loggedTx, sourceID int64, sourceMessageIDs []string,
-) (map[string]string, error) {
-	latestKinds := make(map[string]string, len(sourceMessageIDs))
-	if len(sourceMessageIDs) == 0 {
-		return latestKinds, nil
+// acquisitionReplayJSONIDsQuery reads a request-sized set through one parameter,
+// without expanding the statement past the backend's placeholder limit.
+func (s *Store) acquisitionReplayJSONIDsQuery() string {
+	if s.IsPostgreSQL() {
+		return `SELECT value FROM jsonb_array_elements_text(CAST(? AS jsonb)) AS requested(value)`
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(sourceMessageIDs)), ",")
+	return `SELECT value FROM json_each(?)`
+}
+
+// acquisitionReplayLatestKindsWith traverses the source's runs once, returning
+// only the latest relevant event for each requested identity. idsQuery and its
+// bound arguments describe the request set, never the entire source journal.
+// Native-ID requests do not require a messages row; GC supplies its validated
+// plan as a separate request set. Keep the lifecycle predicates and MAX(id)
+// identical for both paths, including events appended later to older runs.
+func (s *Store) acquisitionReplayLatestKindsWith(
+	ctx context.Context, q *loggedTx, sourceID int64, idsQuery string, idsArgs ...any,
+) (map[string]string, error) {
+	latestKinds := make(map[string]string)
+	runsPredicate := `candidate.sync_run_id IN (SELECT id FROM sync_runs WHERE source_id = ?)`
+	if s.IsPostgreSQL() {
+		// Materializing the run-ID array lets PostgreSQL use the leading
+		// sync_run_id key of the existing run/status index. A flattened semijoin
+		// can instead scan every source's items before checking run ownership.
+		runsPredicate = `candidate.sync_run_id = ANY(ARRAY(SELECT id FROM sync_runs WHERE source_id = ?))`
+	}
 	query := `
 		SELECT item.source_message_id, item.error_kind
 		FROM sync_run_items item
 		JOIN (
 			SELECT MAX(candidate.id) AS item_id
 			FROM sync_run_items candidate
-			JOIN sync_runs run ON run.id = candidate.sync_run_id
-			WHERE run.source_id = ? AND candidate.source_message_id IN (` + placeholders + `)
+			WHERE ` + runsPredicate + ` AND candidate.source_message_id IN (` + idsQuery + `)
 			  AND candidate.phase IN ('fetch', 'ingest')
 			  AND candidate.error_kind IN (
 				'fetch_error', 'batch_fetch_error', 'ingest_error',
@@ -1073,11 +1088,9 @@ func (s *Store) acquisitionReplayLatestKindsWith(
 			  )
 			GROUP BY candidate.source_message_id
 		) latest ON latest.item_id = item.id`
-	args := make([]any, 0, len(sourceMessageIDs)+1)
+	args := make([]any, 0, len(idsArgs)+1)
 	args = append(args, sourceID)
-	for _, sourceMessageID := range sourceMessageIDs {
-		args = append(args, sourceMessageID)
-	}
+	args = append(args, idsArgs...)
 	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read acquisition lifecycle batch: %w", err)
@@ -1100,8 +1113,9 @@ func (s *Store) acquisitionReplayLatestKindsWith(
 }
 
 // recordAcquisitionReplayDispositionsWith appends changed deletion outcomes for
-// tracked Gmail IDs. It processes bounded chunks, preserves source/run ownership,
-// and records a duplicate ID at most once.
+// tracked Gmail IDs. History is read once in this transaction, while writes stay
+// bounded to 500 IDs. Updating the request-local state after each decision keeps
+// duplicates across write chunks idempotent without rereading the journal.
 func (s *Store) recordAcquisitionReplayDispositionsWith(
 	ctx context.Context, q *loggedTx, sourceID int64, sourceMessageIDs []string,
 	kind, message string,
@@ -1109,27 +1123,42 @@ func (s *Store) recordAcquisitionReplayDispositionsWith(
 	if len(sourceMessageIDs) == 0 {
 		return nil
 	}
-	var sourceType string
-	if err := q.QueryRowContext(ctx, `SELECT source_type FROM sources WHERE id = ?`, sourceID).Scan(&sourceType); err != nil {
-		return fmt.Errorf("read acquisition lifecycle source: %w", err)
-	}
-	if sourceType != "gmail" {
-		return nil
-	}
-	runID, err := s.acquisitionReplayRunIDWith(ctx, q, sourceID)
+	runID, err := s.acquisitionReplayDispositionRunIDWith(ctx, q, sourceID)
 	if err != nil {
 		return err
 	}
 	if runID == 0 {
 		return nil
 	}
+	requested, err := json.Marshal(sourceMessageIDs)
+	if err != nil {
+		return fmt.Errorf("encode acquisition lifecycle request: %w", err)
+	}
+	latestKinds, err := s.acquisitionReplayLatestKindsWith(ctx, q, sourceID, s.acquisitionReplayJSONIDsQuery(), string(requested))
+	if err != nil {
+		return err
+	}
+	return s.recordAcquisitionReplayDispositionsForRunWith(ctx, q, runID, sourceMessageIDs, latestKinds, kind, message)
+}
+
+func (s *Store) acquisitionReplayDispositionRunIDWith(ctx context.Context, q *loggedTx, sourceID int64) (int64, error) {
+	var sourceType string
+	if err := q.QueryRowContext(ctx, `SELECT source_type FROM sources WHERE id = ?`, sourceID).Scan(&sourceType); err != nil {
+		return 0, fmt.Errorf("read acquisition lifecycle source: %w", err)
+	}
+	if sourceType != "gmail" {
+		return 0, nil
+	}
+	return s.acquisitionReplayRunIDWith(ctx, q, sourceID)
+}
+
+func (s *Store) recordAcquisitionReplayDispositionsForRunWith(
+	ctx context.Context, q *loggedTx, runID int64, sourceMessageIDs []string, latestKinds map[string]string,
+	kind, message string,
+) error {
 	for start := 0; start < len(sourceMessageIDs); start += acquisitionReplayLookupBatchSize {
 		end := min(start+acquisitionReplayLookupBatchSize, len(sourceMessageIDs))
 		chunk := sourceMessageIDs[start:end]
-		latestKinds, err := s.acquisitionReplayLatestKindsWith(ctx, q, sourceID, chunk)
-		if err != nil {
-			return err
-		}
 		var appendIDs []string
 		for _, sourceMessageID := range chunk {
 			latestKind, tracked := latestKinds[sourceMessageID]
