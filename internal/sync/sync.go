@@ -1336,7 +1336,7 @@ func (s *Syncer) full(
 	summary.SyncRunID = state.syncID
 
 	if s.opts.SourceType != sourceTypeIMAP {
-		if _, err := s.initAcquisitionReplay(source.ID, state.syncID); err != nil {
+		if err := s.initAcquisitionReplay(source.ID, state.syncID); err != nil {
 			s.failStoppedSync(state.syncID, err)
 			return nil, fmt.Errorf("find pending fetch replays: %w", err)
 		}

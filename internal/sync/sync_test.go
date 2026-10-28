@@ -6048,32 +6048,6 @@ func TestIncrementalSyncSameRunRecoveryThenPurge(t *testing.T) {
 	assert.Empty(t, env.Mock.GetMessageCalls)
 }
 
-func TestIncrementalSyncReplayRepairsMissingRaw(t *testing.T) {
-	t.Parallel()
-	env := newTestEnv(t)
-	const id = "missing-raw"
-	seedMessages(env, 1, 1000, id)
-	runFullSync(t, env)
-	source, err := env.Store.GetSourceByIdentifier(testEmail)
-	require.NoError(t, err)
-	_, err = env.Store.DB().Exec(`DELETE FROM message_raw WHERE message_id IN (SELECT id FROM messages WHERE source_id = ?)`, source.ID)
-	require.NoError(t, err)
-	recordSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{SourceMessageID: id, Phase: syncItemPhaseIngest, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindIngestError})
-	env.SetHistory(1000)
-	env.Mock.GetMessageCalls = nil
-	summary := runIncrementalSync(t, env)
-	assert.Equal(t, []string{id}, env.Mock.GetMessageCalls)
-	assert.Zero(t, summary.MessagesAdded)
-	assert.Equal(t, int64(1), summary.MessagesUpdated)
-	run, err := env.Store.GetLastSuccessfulSyncByType(source.ID, "incremental")
-	require.NoError(t, err)
-	assert.Zero(t, run.MessagesAdded)
-	assert.Equal(t, int64(1), run.MessagesUpdated)
-	archived, err := env.Store.MessageExistsWithRawBatchContext(env.Context, source.ID, []string{id})
-	require.NoError(t, err)
-	assert.Contains(t, archived, id)
-}
-
 func TestIncrementalSyncIgnoresLegacyErrorAfterPurge(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
