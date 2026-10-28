@@ -9,6 +9,10 @@ All notable changes to msgvault, grouped by release.
 ## Unreleased
 
 - Media search in Everything, `msgvault media search`, the HTTP API, and MCP now finds text Docbank has extracted from mirrored attachments. A scope with more than 4096 mirrored files excluding images, audio, and video returns `media_search_scope_limit` in `attachments.error`; add a Person filter to narrow the search.
+- Gmail full sync now includes Spam and Trash. Existing archives need an
+  explicit unfiltered, unlimited `sync-full` to discover older messages omitted
+  by earlier full syncs; that backfill can increase Gmail API use, transfer, and
+  local storage. Incremental sync does not backfill old omissions by itself.
 - Drafts and unsent messages no longer count as contact in last contact and cadence.
 - Vector search, daemon status, and Explore coverage now say to restart when a rebuild activated settings changed after the daemon started.
 - Builds use Go 1.27.3, so IMAP connections reject the compromised intermediate certificates listed in [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809).
