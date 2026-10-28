@@ -177,11 +177,6 @@ func (a *staticLabelsAPI) ListLabels(_ context.Context) ([]*gmail.Label, error) 
 	return a.labels, nil
 }
 
-func recordSyncRunItems(t *testing.T, env *TestEnv, sourceID int64, status string, items ...store.SyncRunItem) {
-	t.Helper()
-	recordSyncRunItemsOfType(t, env, sourceID, "full", status, items...)
-}
-
 func recordIncrementalSyncRunItems(t *testing.T, env *TestEnv, sourceID int64, status string, items ...store.SyncRunItem) {
 	t.Helper()
 	recordSyncRunItemsOfType(t, env, sourceID, "incremental", status, items...)
@@ -5994,7 +5989,7 @@ type recoveringLabelAPI struct {
 
 func (a *recoveringLabelAPI) GetMessageRaw(ctx context.Context, id string) (*gmail.RawMessage, error) {
 	raw, err := a.MockAPI.GetMessageRaw(ctx, id)
-	delete(a.MockAPI.GetMessageError, id)
+	delete(a.GetMessageError, id)
 	return raw, err
 }
 
