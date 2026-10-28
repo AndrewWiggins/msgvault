@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -1032,6 +1033,14 @@ func (s *Store) acquisitionReplayJSONIDsQuery() string {
 	return `SELECT value FROM json_each(?)`
 }
 
+// Copy before sorting: callers retain their order, including write-chunk
+// boundaries. Only membership in the SQL request set ignores duplicates.
+func acquisitionReplayRequestJSON(ids []string) ([]byte, error) {
+	ids = slices.Clone(ids)
+	slices.Sort(ids)
+	return json.Marshal(slices.Compact(ids))
+}
+
 // acquisitionReplayLatestKindsWith traverses the source's runs once, returning
 // only the latest relevant event for each requested identity. idsQuery and its
 // bound arguments describe the request set, never the entire source journal.
@@ -1043,19 +1052,30 @@ func (s *Store) acquisitionReplayLatestKindsWith(
 ) (map[string]string, error) {
 	latestKinds := make(map[string]string)
 	runsPredicate := `candidate.sync_run_id IN (SELECT id FROM sync_runs WHERE source_id = ?)`
+	idsPredicate := `candidate.source_message_id IN (` + idsQuery + `)`
+	projection := `SELECT item.source_message_id, item.error_kind FROM sync_run_items item JOIN (`
+	ending := `) latest ON latest.item_id = item.id`
 	if s.IsPostgreSQL() {
 		// Materializing the run-ID array lets PostgreSQL use the leading
 		// sync_run_id key of the existing run/status index. A flattened semijoin
 		// can instead scan every source's items before checking run ownership.
 		runsPredicate = `candidate.sync_run_id = ANY(ARRAY(SELECT id FROM sync_runs WHERE source_id = ?))`
+		// Keep membership as a boolean subplan instead of a flattened semijoin.
+		// PostgreSQL estimates the JSON function at 100 rows. Missing or stale
+		// event statistics can otherwise select a nested loop that rescans the
+		// entire request for each event. IS TRUE preserves WHERE semantics and
+		// allows an uncorrelated hashed subplan, including for generic plans.
+		idsPredicate = `(` + idsPredicate + `) IS TRUE`
+		// Membership's selectivity estimate can also make an outer join scan
+		// every source's journal. Fetch each retained MAX(id) by its primary key.
+		projection = `SELECT latest.source_message_id,
+			(SELECT item.error_kind FROM sync_run_items item WHERE item.id = latest.item_id) FROM (`
+		ending = `) latest`
 	}
-	query := `
-		SELECT item.source_message_id, item.error_kind
-		FROM sync_run_items item
-		JOIN (
-			SELECT MAX(candidate.id) AS item_id
+	query := projection + `
+			SELECT candidate.source_message_id, MAX(candidate.id) AS item_id
 			FROM sync_run_items candidate
-			WHERE ` + runsPredicate + ` AND candidate.source_message_id IN (` + idsQuery + `)
+			WHERE ` + runsPredicate + ` AND ` + idsPredicate + `
 			  AND candidate.phase IN ('fetch', 'ingest')
 			  AND candidate.error_kind IN (
 				'fetch_error', 'batch_fetch_error', 'ingest_error',
@@ -1064,7 +1084,7 @@ func (s *Store) acquisitionReplayLatestKindsWith(
 				'acquisition_source_deleted'
 			  )
 			GROUP BY candidate.source_message_id
-		) latest ON latest.item_id = item.id`
+		` + ending
 	args := make([]any, 0, len(idsArgs)+1)
 	args = append(args, sourceID)
 	args = append(args, idsArgs...)
@@ -1107,7 +1127,7 @@ func (s *Store) recordAcquisitionReplayDispositionsWith(
 	if runID == 0 {
 		return nil
 	}
-	requested, err := json.Marshal(sourceMessageIDs)
+	requested, err := acquisitionReplayRequestJSON(sourceMessageIDs)
 	if err != nil {
 		return fmt.Errorf("encode acquisition lifecycle request: %w", err)
 	}
