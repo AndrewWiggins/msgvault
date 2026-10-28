@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-27"
+last_edited: "2026-10-28"
 title: Architecture Overview
 description: How msgvault captures communications, preserves the archive, and serves people, search, and automation.
 ---
@@ -158,6 +158,9 @@ acquires the raw MIME or records a deletion disposition. The append-only
 `sync_run_items` journal identifies each occurrence by source and native Gmail
 message ID. Replay reads all source runs, including failed and full runs;
 finishing a newer run does not erase earlier failures.
+Replay streams the relevant events into one state per source/native identity.
+Its in-memory snapshot grows with the number of identities in that source's
+history, rather than retaining every historical event.
 
 | Journal outcome | Effect on automatic acquisition |
 |---|---|
@@ -181,10 +184,10 @@ transaction. Failure to append that resolution rolls back the new RAW and leaves
 a durable ingestion failure for replay.
 
 For tracked Gmail IDs, provider deletion batches and SQLite GC read acquisition
-history once per source in the deletion transaction. The existing run indexes
-select that source's events; SQL retains the latest event only for requested
-identities. Provider requests work even when no message row exists. Journal state
-is bounded by the deletion request, rather than all identities in the historical
+history once per source in the deletion transaction. The query filters events by
+source and can use the existing run indexes. SQL retains the latest event only
+for requested identities. Provider requests work even when no message row exists.
+Journal state is bounded by the deletion request, rather than all identities in the historical
 journal, and changed dispositions are still written in groups of at most 500.
 GC validates its existing complete plan before removal and reads candidate rows
 by primary key in pages of 500. Its history request uses the same eligibility
