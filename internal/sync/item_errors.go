@@ -116,6 +116,8 @@ func (s *Syncer) getMessagesRawBatchWithIdentityValidation(
 	return results, nil
 }
 
+// pendingFetchReplayIDs returns the Gmail messages whose latest fetch or ingest
+// outcome since the latest completed incremental run is an error.
 func (s *Syncer) pendingFetchReplayIDs(sourceID int64) ([]string, error) {
 	items, err := s.store.ListUnresolvedSyncItemErrors(context.Background(), sourceID)
 	if err != nil {
