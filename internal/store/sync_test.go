@@ -1331,4 +1331,26 @@ func TestStore_ListUnresolvedSyncItemErrors(t *testing.T) {
 	assert.Equal(t, "reopened", items[1].SourceMessageID)
 	assert.Equal(t, "fetch_error", items[1].ErrorKind)
 	assert.Equal(t, nextRun, items[1].SyncRunID)
+
+	boundary, err := f.Store.StartSync(f.Source.ID, "incremental")
+	require.NoError(t, err)
+	require.NoError(t, f.Store.RecordSyncRunItem(store.SyncRunItem{
+		SyncRunID: boundary, SourceMessageID: "still-failing", Phase: "fetch",
+		Status: store.SyncRunItemStatusError, ErrorKind: "fetch_error",
+	}))
+	require.NoError(t, f.Store.CompleteSync(boundary, "1001"))
+	full, err := f.Store.StartSync(f.Source.ID, "full")
+	require.NoError(t, err)
+	require.NoError(t, f.Store.RecordSyncRunItem(store.SyncRunItem{
+		SyncRunID: full, SourceMessageID: "later-full", Phase: "ingest",
+		Status: store.SyncRunItemStatusError, ErrorKind: "ingest_error",
+	}))
+	require.NoError(t, f.Store.CompleteSync(full, "1001"))
+	items, err = f.Store.ListUnresolvedSyncItemErrors(context.Background(), f.Source.ID)
+	require.NoError(t, err)
+	var ids []string
+	for _, item := range items {
+		ids = append(ids, item.SourceMessageID)
+	}
+	assert.ElementsMatch(t, []string{"still-failing", "later-full"}, ids)
 }

@@ -44,6 +44,12 @@ func (s *Syncer) incremental(
 		return nil, fmt.Errorf("invalid history ID %q: %w", source.SyncCursor.String, err)
 	}
 
+	// Read pending debt before creating a run so a read error leaves no failed run.
+	pendingReplayIDs, err := s.pendingFetchReplayIDs(source.ID)
+	if err != nil {
+		return nil, fmt.Errorf("find pending fetch replays: %w", err)
+	}
+
 	// Start sync
 	syncID, err := s.startSync(ctx, execution, "incremental", "")
 	if err != nil {
@@ -54,11 +60,7 @@ func (s *Syncer) incremental(
 	s = &scoped
 	summary.SyncRunID = syncID
 
-	pendingReplayIDs, err := s.initAcquisitionReplay(source.ID, syncID)
-	if err != nil {
-		s.failStoppedSync(syncID, err)
-		return nil, fmt.Errorf("find pending fetch replays: %w", err)
-	}
+	s.setAcquisitionReplay(syncID, pendingReplayIDs)
 
 	// Defer failure handling — recover from panics and return as error
 	defer func() {
@@ -355,7 +357,7 @@ func (s *Syncer) replayFetchFailures(
 		return nil, nil
 	}
 
-	existing, err := s.store.MessageExistsBatch(sourceID, messageIDs)
+	existing, err := s.store.MessageExistsWithRawBatchContext(ctx, sourceID, messageIDs)
 	if err != nil {
 		return nil, fmt.Errorf("check replay messages: %w", err)
 	}
@@ -369,6 +371,10 @@ func (s *Syncer) replayFetchFailures(
 	}
 	if len(fetchIDs) == 0 {
 		return nil, nil
+	}
+	metadata, err := s.store.MessageExistsBatchContext(ctx, sourceID, fetchIDs)
+	if err != nil {
+		return nil, fmt.Errorf("check replay message metadata: %w", err)
 	}
 
 	batchSize := 10
@@ -424,7 +430,11 @@ func (s *Syncer) replayFetchFailures(
 				checkpoint.ErrorsCount++
 				continue
 			}
-			checkpoint.MessagesAdded++
+			if _, exists := metadata[messageID]; exists {
+				checkpoint.MessagesUpdated++
+			} else {
+				checkpoint.MessagesAdded++
+			}
 			summary.BytesDownloaded += int64(len(result.Message.Raw))
 			successfulIDs = append(successfulIDs, messageID)
 		}
