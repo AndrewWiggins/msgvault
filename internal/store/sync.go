@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -23,17 +21,9 @@ const (
 	SyncStatusPaused                       = "paused"
 	GmailHistoryRecoveryRequestFingerprint = "gmail-history-recovery:v1"
 
-	SyncRunItemStatusError   = "error"
-	SyncRunItemStatusSkipped = "skipped"
-
-	AcquisitionReplayResolved      = "acquisition_resolved"
-	AcquisitionReplayLocalDeletion = "acquisition_local_deletion"
-	AcquisitionReplaySourceDeleted = "acquisition_source_deleted"
-
-	acquisitionStatePending      = "pending"
-	acquisitionStateAcquired     = "acquired"
-	acquisitionStateTerminal     = "terminal"
-	acquisitionStateLocalDeleted = "local-deleted"
+	SyncRunItemStatusError    = "error"
+	SyncRunItemStatusSkipped  = "skipped"
+	SyncRunItemStatusResolved = "resolved"
 
 	manualTransactionCleanupTimeout = 5 * time.Second
 	syncWorkerExitedMessage         = "sync worker exited before recording completion"
@@ -53,10 +43,6 @@ var ErrSyncAlreadyActive = errors.New("sync already active")
 // ErrSyncRunSuperseded is returned when a terminal write belongs to a sync
 // generation that is no longer running or current for its source.
 var ErrSyncRunSuperseded = errors.New("sync run superseded")
-
-// ErrAcquisitionLocallyDeleted prevents a stale Gmail fetch from recreating an
-// occurrence intentionally destroyed locally. The native ID is never reused.
-var ErrAcquisitionLocallyDeleted = errors.New("acquisition intentionally deleted locally")
 
 type syncGeneration struct {
 	sourceID int64
@@ -411,6 +397,7 @@ type Checkpoint struct {
 // SyncRunItem records an individual item outcome within a sync run.
 // Error items are actionable and count toward SyncRun.ErrorsCount; skipped
 // items preserve expected churn such as Gmail messages deleted before fetch.
+// Resolved items settle earlier acquisition failures once a message is archived.
 type SyncRunItem struct {
 	ID              int64
 	SyncRunID       int64
@@ -962,59 +949,19 @@ func (s *Store) PinSyncHandoffCursorContext(ctx context.Context, syncID int64, c
 	})
 }
 
-// RecordSyncRunItem appends a per-item sync outcome without replacing earlier
-// diagnostics. A fetch/skipped/acquisition_resolved outcome is conditional:
-// the RAW must still exist and no intentional local deletion may have committed.
-// The check and append share a transaction and database locks with acquisition
-// and purge, including across processes. A nil result can mean resolution was
-// suppressed; it does not guarantee that a journal row was inserted.
+// RecordSyncRunItem records a per-item sync outcome for diagnostics.
 func (s *Store) RecordSyncRunItem(item SyncRunItem) error {
 	return s.RecordSyncRunItemContext(context.Background(), item)
 }
 
-// RecordSyncRunItemContext honors cancellation during RecordSyncRunItem,
-// including its conditional resolution: nil need not mean a row was inserted.
+// RecordSyncRunItemContext honors cancellation during RecordSyncRunItem.
 func (s *Store) RecordSyncRunItemContext(ctx context.Context, item SyncRunItem) error {
-	if item.Phase == "fetch" && item.Status == SyncRunItemStatusSkipped && item.ErrorKind == AcquisitionReplayResolved {
-		var sourceID int64
-		if err := s.db.QueryRowContext(ctx, `SELECT source_id FROM sync_runs WHERE id = ?`, item.SyncRunID).Scan(&sourceID); err != nil {
-			return fmt.Errorf("read acquisition resolution source: %w", err)
-		}
-		if err := s.requireSyncSource(sourceID); err != nil {
-			return err
-		}
-		// The shared identity/source locks precede the generation fence. Purges
-		// take the exclusive identity lock before journaling or deleting; message
-		// persistence already takes these shared locks. The RAW check and append
-		// therefore cannot straddle a committed purge, even in another process.
-		return s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{sourceID}}, func(tx *loggedTx) error {
-			q := boundQuerier{ctx: ctx, q: tx}
-			deleted, err := acquisitionLocallyDeletedWith(q, sourceID, item.SourceMessageID)
-			if err != nil || deleted {
-				return err
-			}
-			var withRaw bool
-			if err := q.QueryRow(`SELECT EXISTS (
-				SELECT 1 FROM messages m JOIN message_raw mr ON mr.message_id=m.id
-				WHERE m.source_id=? AND m.source_message_id=?)`, sourceID, item.SourceMessageID).Scan(&withRaw); err != nil {
-				return fmt.Errorf("check acquisition resolution RAW: %w", err)
-			}
-			if !withRaw {
-				return nil
-			}
-			return recordSyncRunItemWith(q, s.dialect, item)
-		})
-	}
-	return recordSyncRunItemWith(boundQuerier{ctx: ctx, q: s.db}, s.dialect, item)
-}
-
-func recordSyncRunItemWith(q querier, dialect Dialect, item SyncRunItem) error {
-	_, err := q.Exec(fmt.Sprintf(`
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO sync_run_items (
 			sync_run_id, source_message_id, phase, status,
 			error_kind, error_message, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, %s)
-	`, dialect.Now()),
+	`, s.dialect.Now()),
 		item.SyncRunID, item.SourceMessageID, item.Phase, item.Status,
 		item.ErrorKind, item.ErrorMessage,
 	)
@@ -1022,351 +969,6 @@ func recordSyncRunItemWith(q querier, dialect Dialect, item SyncRunItem) error {
 		return fmt.Errorf("insert sync_run_item: %w", err)
 	}
 	return nil
-}
-
-func acquisitionLocallyDeletedWith(q querier, sourceID int64, nativeID string) (bool, error) {
-	var deleted bool
-	err := q.QueryRow(`SELECT EXISTS (
-		SELECT 1 FROM sync_run_items item JOIN sync_runs run ON run.id=item.sync_run_id
-		WHERE run.source_id=? AND item.source_message_id=? AND item.phase='fetch'
-		  AND item.status='skipped' AND item.error_kind='acquisition_local_deletion'
-	)`, sourceID, nativeID).Scan(&deleted)
-	if err != nil {
-		return false, fmt.Errorf("read intentional acquisition deletion: %w", err)
-	}
-	return deleted, nil
-}
-
-const acquisitionLocalDeletionIndexName = "idx_sync_run_items_local_deletion"
-const acquisitionReplayLookupBatchSize = 500
-
-// Native IDs are selective but only source-scoped. Keep the run ID in the
-// partial index to verify source ownership without scanning unrelated outcomes.
-// Only local-deletion decisions block persistence. Repeated decisions are valid,
-// so the index excludes other outcomes and must remain nonunique.
-const acquisitionLocalDeletionIndexDefinition = `ON sync_run_items(source_message_id, sync_run_id)
-	WHERE phase='fetch' AND status='skipped' AND error_kind='acquisition_local_deletion'`
-
-// acquisitionReplayJSONIDsQuery reads a request-sized set through one parameter,
-// without expanding the statement past the backend's placeholder limit.
-func (s *Store) acquisitionReplayJSONIDsQuery() string {
-	if s.IsPostgreSQL() {
-		return `SELECT value FROM jsonb_array_elements_text(CAST(? AS jsonb)) AS requested(value)`
-	}
-	return `SELECT value FROM json_each(?)`
-}
-
-// Copy before sorting: callers retain their order, including write-chunk
-// boundaries. Only membership in the SQL request set ignores duplicates.
-func acquisitionReplayRequestJSON(ids []string) ([]byte, error) {
-	ids = slices.Clone(ids)
-	slices.Sort(ids)
-	return json.Marshal(slices.Compact(ids))
-}
-
-// acquisitionReplayLatestKindsWith traverses the source's runs once, returning
-// only the latest relevant event for each requested identity. idsQuery and its
-// bound arguments describe the request set, never the entire source journal.
-// Native-ID requests do not require a messages row; GC supplies its validated
-// plan as a separate request set. Keep the lifecycle predicates and MAX(id)
-// identical for both paths, including events appended later to older runs.
-func (s *Store) acquisitionReplayLatestKindsWith(
-	ctx context.Context, q *loggedTx, sourceID int64, idsQuery string, idsArgs ...any,
-) (map[string]string, error) {
-	latestKinds := make(map[string]string)
-	runsPredicate := `candidate.sync_run_id IN (SELECT id FROM sync_runs WHERE source_id = ?)`
-	idsPredicate := `candidate.source_message_id IN (` + idsQuery + `)`
-	projection := `SELECT item.source_message_id, item.error_kind FROM sync_run_items item JOIN (`
-	ending := `) latest ON latest.item_id = item.id`
-	if s.IsPostgreSQL() {
-		// Materializing the run-ID array lets PostgreSQL use the leading
-		// sync_run_id key of the existing run/status index. A flattened semijoin
-		// can instead scan every source's items before checking run ownership.
-		runsPredicate = `candidate.sync_run_id = ANY(ARRAY(SELECT id FROM sync_runs WHERE source_id = ?))`
-		// Keep membership as a boolean subplan instead of a flattened semijoin.
-		// PostgreSQL estimates the JSON function at 100 rows. Missing or stale
-		// event statistics can otherwise select a nested loop that rescans the
-		// entire request for each event. IS TRUE preserves WHERE semantics and
-		// allows an uncorrelated hashed subplan, including for generic plans.
-		idsPredicate = `(` + idsPredicate + `) IS TRUE`
-		// Membership's selectivity estimate can also make an outer join scan
-		// every source's journal. Fetch each retained MAX(id) by its primary key.
-		projection = `SELECT latest.source_message_id,
-			(SELECT item.error_kind FROM sync_run_items item WHERE item.id = latest.item_id) FROM (`
-		ending = `) latest`
-	}
-	query := projection + `
-			SELECT candidate.source_message_id, MAX(candidate.id) AS item_id
-			FROM sync_run_items candidate
-			WHERE ` + runsPredicate + ` AND ` + idsPredicate + `
-			  AND candidate.phase IN ('fetch', 'ingest')
-			  AND candidate.error_kind IN (
-				'fetch_error', 'batch_fetch_error', 'ingest_error',
-				'gmail_not_found', 'message_gone',
-				'acquisition_resolved', 'acquisition_local_deletion',
-				'acquisition_source_deleted'
-			  )
-			GROUP BY candidate.source_message_id
-		` + ending
-	args := make([]any, 0, len(idsArgs)+1)
-	args = append(args, sourceID)
-	args = append(args, idsArgs...)
-	rows, err := q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("read acquisition lifecycle batch: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var sourceMessageID, kind string
-		if err := rows.Scan(&sourceMessageID, &kind); err != nil {
-			return nil, fmt.Errorf("scan acquisition lifecycle batch: %w", err)
-		}
-		latestKinds[sourceMessageID] = kind
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate acquisition lifecycle batch: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close acquisition lifecycle batch: %w", err)
-	}
-	return latestKinds, nil
-}
-
-// recordAcquisitionReplayDispositionsWith appends changed deletion outcomes for
-// tracked Gmail IDs. History is read once in this transaction, while writes stay
-// bounded to 500 IDs. Updating the request-local state after each decision keeps
-// duplicates across write chunks idempotent without rereading the journal.
-func (s *Store) recordAcquisitionReplayDispositionsWith(
-	ctx context.Context, q *loggedTx, sourceID int64, sourceMessageIDs []string,
-	kind, message string,
-) error {
-	if len(sourceMessageIDs) == 0 {
-		return nil
-	}
-	runID, err := s.acquisitionReplayDispositionRunIDWith(ctx, q, sourceID)
-	if err != nil {
-		return err
-	}
-	if runID == 0 {
-		return nil
-	}
-	requested, err := acquisitionReplayRequestJSON(sourceMessageIDs)
-	if err != nil {
-		return fmt.Errorf("encode acquisition lifecycle request: %w", err)
-	}
-	latestKinds, err := s.acquisitionReplayLatestKindsWith(ctx, q, sourceID, s.acquisitionReplayJSONIDsQuery(), string(requested))
-	if err != nil {
-		return err
-	}
-	return s.recordAcquisitionReplayDispositionsForRunWith(ctx, q, runID, sourceMessageIDs, latestKinds, kind, message)
-}
-
-func (s *Store) acquisitionReplayDispositionRunIDWith(ctx context.Context, q *loggedTx, sourceID int64) (int64, error) {
-	var sourceType string
-	if err := q.QueryRowContext(ctx, `SELECT source_type FROM sources WHERE id = ?`, sourceID).Scan(&sourceType); err != nil {
-		return 0, fmt.Errorf("read acquisition lifecycle source: %w", err)
-	}
-	if sourceType != "gmail" {
-		return 0, nil
-	}
-	return s.acquisitionReplayRunIDWith(ctx, q, sourceID)
-}
-
-func (s *Store) recordAcquisitionReplayDispositionsForRunWith(
-	ctx context.Context, q *loggedTx, runID int64, sourceMessageIDs []string, latestKinds map[string]string,
-	kind, message string,
-) error {
-	for start := 0; start < len(sourceMessageIDs); start += acquisitionReplayLookupBatchSize {
-		end := min(start+acquisitionReplayLookupBatchSize, len(sourceMessageIDs))
-		chunk := sourceMessageIDs[start:end]
-		var appendIDs []string
-		for _, sourceMessageID := range chunk {
-			latestKind, tracked := latestKinds[sourceMessageID]
-			if !tracked || latestKind == kind {
-				continue
-			}
-			appendIDs = append(appendIDs, sourceMessageID)
-			latestKinds[sourceMessageID] = kind
-		}
-		if err := s.appendAcquisitionReplayDispositionsForRunWith(
-			ctx, q, runID, appendIDs, kind, message,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// appendAcquisitionReplayDispositionWith is also used after a transaction has
-// already folded the journal, avoiding one full journal lookup per absent ID.
-func (s *Store) appendAcquisitionReplayDispositionWith(
-	q querier, sourceID int64, sourceMessageID, kind, message string,
-) error {
-	runID := int64(0)
-	if s.syncGeneration != nil && s.syncGeneration.sourceID == sourceID {
-		runID = s.syncGeneration.runID
-	} else if err := q.QueryRow(`
-		SELECT id FROM sync_runs WHERE source_id = ? ORDER BY id DESC LIMIT 1`, sourceID).Scan(&runID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		return fmt.Errorf("find acquisition lifecycle run: %w", err)
-	}
-	_, err := q.Exec(fmt.Sprintf(`
-		INSERT INTO sync_run_items (
-			sync_run_id, source_message_id, phase, status, error_kind, error_message, created_at
-		) VALUES (?, ?, 'fetch', 'skipped', ?, ?, %s)
-	`, s.dialect.Now()), runID, sourceMessageID, kind, message)
-	if err != nil {
-		return fmt.Errorf("record acquisition lifecycle decision: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) acquisitionReplayRunIDWith(
-	ctx context.Context, q *loggedTx, sourceID int64,
-) (int64, error) {
-	if s.syncGeneration != nil && s.syncGeneration.sourceID == sourceID {
-		return s.syncGeneration.runID, nil
-	}
-	var runID int64
-	if err := q.QueryRowContext(ctx, `
-		SELECT id FROM sync_runs WHERE source_id = ? ORDER BY id DESC LIMIT 1`, sourceID).Scan(&runID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("find acquisition lifecycle run: %w", err)
-	}
-	return runID, nil
-}
-
-func (s *Store) appendAcquisitionReplayDispositionsForRunWith(
-	ctx context.Context, q *loggedTx, runID int64, sourceMessageIDs []string, kind, message string,
-) error {
-	for start := 0; start < len(sourceMessageIDs); start += acquisitionReplayLookupBatchSize {
-		end := min(start+acquisitionReplayLookupBatchSize, len(sourceMessageIDs))
-		chunk := sourceMessageIDs[start:end]
-		values := make([]string, 0, len(chunk))
-		args := make([]any, 0, len(chunk)*4)
-		for _, sourceMessageID := range chunk {
-			values = append(values, fmt.Sprintf("(?, ?, 'fetch', 'skipped', ?, ?, %s)", s.dialect.Now()))
-			args = append(args, runID, sourceMessageID, kind, message)
-		}
-		query := `INSERT INTO sync_run_items (
-			sync_run_id, source_message_id, phase, status, error_kind, error_message, created_at
-		) VALUES ` + strings.Join(values, ",")
-		if _, err := q.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("record acquisition lifecycle decision: %w", err)
-		}
-	}
-	return nil
-}
-
-// AcquisitionReplayState reads pending and terminal acquisition states across all
-// source runs, including full, failed and legacy untyped runs. Diagnostics and
-// lifecycle decisions are append-only. A prior acquisition resolution is
-// valid only while its RAW remains present; explicit local/source deletion
-// events survive physical removal of the message row. Local deletion overrides
-// every later outcome; remote disappearance can be superseded by later
-// acquisition events. Without a recorded disposition, historical removal cannot
-// be distinguished from accidental RAW loss, so an old failure stays retryable.
-// terminalIDs contains remote disappearance, excluding intentional local deletion.
-// Both result lists are derived from the same single journal fold so sync pages
-// do not rescan the complete lifecycle history.
-func (s *Store) AcquisitionReplayState(sourceID int64) (pendingIDs, terminalIDs []string, err error) {
-	states, err := s.acquisitionReplayStatesWith(context.Background(), s.db, sourceID)
-	if err != nil {
-		return nil, nil, err
-	}
-	acquired := make([]string, 0, len(states))
-	pendingIDs = make([]string, 0, len(states))
-	terminalIDs = make([]string, 0)
-	for id, state := range states {
-		switch state {
-		case acquisitionStatePending:
-			pendingIDs = append(pendingIDs, id)
-		case acquisitionStateAcquired:
-			acquired = append(acquired, id)
-		case acquisitionStateTerminal:
-			terminalIDs = append(terminalIDs, id)
-		}
-	}
-	withRaw, err := s.MessageExistsWithRawBatch(sourceID, acquired)
-	if err != nil {
-		return nil, nil, fmt.Errorf("check resolved acquisition RAW: %w", err)
-	}
-	for _, id := range acquired {
-		if _, ok := withRaw[id]; !ok {
-			pendingIDs = append(pendingIDs, id)
-		}
-	}
-	sort.Strings(pendingIDs)
-	sort.Strings(terminalIDs)
-	return pendingIDs, terminalIDs, nil
-}
-
-// PendingAcquisitionReplayIDs returns unresolved acquisition IDs.
-func (s *Store) PendingAcquisitionReplayIDs(sourceID int64) ([]string, error) {
-	pendingIDs, _, err := s.AcquisitionReplayState(sourceID)
-	return pendingIDs, err
-}
-
-// acquisitionReplayStatesWith folds the same native-ID lifecycle for both
-// replay and complete-inventory reconciliation. Reading through q lets the
-// inventory acknowledgements and tombstones share one fenced transaction.
-func (s *Store) acquisitionReplayStatesWith(ctx context.Context, q chunkQuerier, sourceID int64) (map[string]string, error) {
-	rows, err := q.QueryContext(ctx, `
-  SELECT item.source_message_id, item.status, item.phase, item.error_kind
-  FROM sync_run_items item
-  JOIN sync_runs run ON run.id = item.sync_run_id
-  WHERE run.source_id = ? AND item.source_message_id NOT IN ('', '(unknown)')
-    AND ((item.status = 'error' AND
-          ((item.phase = 'fetch' AND item.error_kind IN ('fetch_error', 'batch_fetch_error'))
-            OR (item.phase = 'ingest' AND item.error_kind = 'ingest_error')))
-      OR (item.status = 'skipped' AND item.phase = 'fetch'
-          AND item.error_kind IN ('message_gone', 'gmail_not_found',
-              'acquisition_resolved', 'acquisition_local_deletion',
-              'acquisition_source_deleted')))
-  ORDER BY item.id`, sourceID)
-	if err != nil {
-		return nil, fmt.Errorf("read acquisition debt: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	states := make(map[string]string)
-	for rows.Next() {
-		var messageID, status, phase, errorKind string
-		if err := rows.Scan(&messageID, &status, &phase, &errorKind); err != nil {
-			return nil, err
-		}
-		// Local destruction is an explicit policy for an immutable Gmail native
-		// identity. Later stale fetch errors, resolutions or remote observations
-		// remain diagnostics; none can revoke that policy. Remote deletion alone
-		// remains reopenable by subsequent History acquisition events.
-		if states[messageID] == acquisitionStateLocalDeleted {
-			continue
-		}
-		if status == SyncRunItemStatusSkipped && phase == "fetch" {
-			switch errorKind {
-			case AcquisitionReplayLocalDeletion:
-				states[messageID] = acquisitionStateLocalDeleted
-			case "message_gone", AcquisitionReplaySourceDeleted:
-				states[messageID] = acquisitionStateTerminal
-			case AcquisitionReplayResolved:
-				states[messageID] = acquisitionStateAcquired
-			default:
-				states[messageID] = acquisitionStatePending
-			}
-		} else {
-			states[messageID] = acquisitionStatePending
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close acquisition debt: %w", err)
-	}
-	return states, nil
 }
 
 // CountSyncRunItems returns the number of recorded per-item sync outcomes for
@@ -1422,6 +1024,41 @@ func (s *Store) ListSyncRunItemsContext(ctx context.Context, syncRunID int64, st
 	}
 	defer func() { _ = rows.Close() }()
 
+	return scanSyncRunItems(rows)
+}
+
+// ListUnresolvedSyncItemErrors returns the latest acquisition outcome for each
+// source message in phases, keeping only errors across all of the source's runs.
+func (s *Store) ListUnresolvedSyncItemErrors(ctx context.Context, sourceID int64, phases []string) ([]SyncRunItem, error) {
+	if len(phases) == 0 {
+		return nil, nil
+	}
+	args := []any{sourceID}
+	for _, phase := range phases {
+		args = append(args, phase)
+	}
+	args = append(args, SyncRunItemStatusError)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, sync_run_id, source_message_id, phase, status,
+		       error_kind, error_message, created_at
+		FROM sync_run_items
+		WHERE id IN (
+			SELECT MAX(i.id)
+			FROM sync_run_items i
+			JOIN sync_runs r ON r.id = i.sync_run_id
+			WHERE r.source_id = ? AND i.phase IN (`+placeholders(len(phases))+`)
+			GROUP BY i.source_message_id
+		) AND status = ?
+		ORDER BY id
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list unresolved sync item errors: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanSyncRunItems(rows)
+}
+
+func scanSyncRunItems(rows *loggedRows) ([]SyncRunItem, error) {
 	items := make([]SyncRunItem, 0)
 	for rows.Next() {
 		var item SyncRunItem

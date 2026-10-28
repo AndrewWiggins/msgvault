@@ -100,101 +100,9 @@ func equalGCPlans(a, b GCPlan) bool {
 		slices.Equal(a.SourceDeletedIDs, b.SourceDeletedIDs)
 }
 
-// recordGCSourceDeletedAcquisitions reuses the GC plan already checked in this
-// transaction. Each bounded lookup visits only that page's primary keys, rather
-// than scanning and sorting the remaining purge population again for each page.
-// Journal state is loaded at most once per Gmail source, restricted to that
-// plan's identities. Its total size is bounded by the plan, not by journal size;
-// candidate rows remain in pages of 500 rather than an additional full Go slice.
-func (s *Store) recordGCSourceDeletedAcquisitions(ctx context.Context, tx *loggedTx, messageIDs []int64) error {
-	if len(messageIDs) == 0 {
-		return nil
-	}
-	// Unlike provider deletion, GC already has a validated set of existing
-	// message rows. Reuse the plan's exact eligibility predicate in this same
-	// transaction, before any message removal. The source/deletion index bounds
-	// this set without copying all native IDs or re-decoding the complete plan
-	// for each source. The journal still uses source/native identity.
-	idsQuery := `SELECT source_message_id FROM messages
-		WHERE source_id = ? AND deleted_from_source_at IS NOT NULL
-		  AND NOT (` + managedDraftRetainedMessageSQL + `)`
-	type sourceState struct {
-		runID       int64
-		latestKinds map[string]string
-	}
-	states := make(map[int64]sourceState)
-	for start := 0; start < len(messageIDs); start += acquisitionReplayLookupBatchSize {
-		end := min(start+acquisitionReplayLookupBatchSize, len(messageIDs))
-		chunk := messageIDs[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
-		args := make([]any, 0, len(chunk))
-		for _, id := range chunk {
-			args = append(args, id)
-		}
-		rows, err := tx.QueryContext(ctx, `
-			SELECT messages.source_id, messages.source_message_id
-			FROM messages
-			WHERE messages.id IN (`+placeholders+`)`, args...)
-		if err != nil {
-			return fmt.Errorf("list Gmail acquisition GC candidates: %w", err)
-		}
-		idsBySource := make(map[int64][]string)
-		for rows.Next() {
-			var sourceID int64
-			var nativeID string
-			if err := rows.Scan(&sourceID, &nativeID); err != nil {
-				_ = rows.Close()
-				return fmt.Errorf("scan Gmail acquisition GC candidate: %w", err)
-			}
-			idsBySource[sourceID] = append(idsBySource[sourceID], nativeID)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("iterate Gmail acquisition GC candidates: %w", err)
-		}
-		if err := rows.Close(); err != nil {
-			return fmt.Errorf("close Gmail acquisition GC candidates: %w", err)
-		}
-		sourceIDs := make([]int64, 0, len(idsBySource))
-		for sourceID := range idsBySource {
-			sourceIDs = append(sourceIDs, sourceID)
-		}
-		slices.Sort(sourceIDs)
-		for _, sourceID := range sourceIDs {
-			state, loaded := states[sourceID]
-			if !loaded {
-				state.runID, err = s.acquisitionReplayDispositionRunIDWith(ctx, tx, sourceID)
-				if err != nil {
-					return err
-				}
-				if state.runID != 0 {
-					state.latestKinds, err = s.acquisitionReplayLatestKindsWith(ctx, tx, sourceID, idsQuery, sourceID)
-					if err != nil {
-						return err
-					}
-				}
-				states[sourceID] = state
-			}
-			if state.runID == 0 {
-				continue
-			}
-			if err := s.recordAcquisitionReplayDispositionsForRunWith(
-				ctx, tx, state.runID, idsBySource[sourceID], state.latestKinds,
-				AcquisitionReplaySourceDeleted,
-				"Gmail source deletion retained before local garbage collection",
-			); err != nil {
-				return fmt.Errorf("record Gmail acquisition GC dispositions for source %d: %w", sourceID, err)
-			}
-		}
-	}
-	return nil
-}
-
 // ExecuteGCContext permanently removes source-deleted rows only. The expected
 // plan is rechecked inside the deletion transaction so a confirmation cannot
 // authorize a population that changed while the operator was reading it.
-// Tracked Gmail acquisitions retain acquisition_source_deleted in that same
-// transaction, so removing RAW cannot reopen debt as accidental content loss.
 func (s *Store) ExecuteGCContext(
 	ctx context.Context,
 	expected GCPlan,
@@ -216,9 +124,6 @@ func (s *Store) ExecuteGCContext(
 				expected,
 				actual,
 			)
-		}
-		if err := s.recordGCSourceDeletedAcquisitions(ctx, tx, actual.SourceDeletedIDs); err != nil {
-			return fmt.Errorf("record Gmail acquisition resolution before GC: %w", err)
 		}
 		affectedConversationIDs, err := commaSeparatedIDs(q, `
 			SELECT COALESCE(GROUP_CONCAT(id, ','), '')

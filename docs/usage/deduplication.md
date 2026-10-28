@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-10-27
+last_edited: 2026-08-30
 title: Deduplication
 description: Find and merge duplicate messages across accounts and collections with a reversible, five-rung safety ladder that never deletes anything by default.
 ---
@@ -154,10 +154,6 @@ msgvault deduplicate --undo <batch-id>
 ```bash
 msgvault delete-deduped --batch <batch-id>
 ```
-
-For Gmail, `delete-deduped` also records the intentional removal so automatic
-sync will not reacquire those source/native message IDs. This applies to both
-`--batch` and `--all-hidden`; see the [command contract](../cli-reference.md#delete-deduped).
 
 ## Common Scenarios
 

@@ -408,14 +408,6 @@ func TestListCompleteMessageSnapshotIncludesSpamAndTrash(t *testing.T) {
 	requirements.Len(response.Messages, 1, "snapshot messages")
 	checks.Contains(query, "includeSpamTrash=true")
 	checks.NotContains(query, "q=")
-	checks.NotContains(query, "labelIds")
-	checks.Contains(query, "maxResults=500")
-	_, err = client.ListCompleteMessageSnapshot(t.Context(), "page-2")
-	requirements.NoError(err)
-	checks.Contains(query, "pageToken=page-2")
-	checks.Contains(query, "includeSpamTrash=true")
-	checks.NotContains(query, "q=")
-	checks.NotContains(query, "labelIds")
 }
 
 // rewriteTransport rewrites requests from the Gmail API baseURL to a test server URL.

@@ -723,52 +723,15 @@ func (s *Store) StreamMessageRawContext(ctx context.Context, messageIDs []int64,
 // reversed — those changes are additive enrichment that leaves
 // survivors strictly better off.
 func (s *Store) UndoDedup(batchID string) (int64, error) {
-	var restored int64
-	err := s.withAttributionTxContext(context.Background(), attributionLock{Exclusive: true}, func(tx *loggedTx) error {
-		// A purge must keep its journalled population hidden until DELETE.
-		// Serialize undo with that transaction, just like MergeDuplicates.
-		result, err := tx.Exec(`
-			UPDATE messages SET deleted_at = NULL, delete_batch_id = NULL
-			WHERE delete_batch_id = ?`, batchID)
-		if err != nil {
-			return fmt.Errorf("undo dedup: %w", err)
-		}
-		restored, err = result.RowsAffected()
-		return err
-	})
+	result, err := s.db.Exec(`
+		UPDATE messages
+		SET deleted_at = NULL, delete_batch_id = NULL
+		WHERE delete_batch_id = ?
+	`, batchID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("undo dedup: %w", err)
 	}
-	return restored, nil
-}
-
-// recordDedupAcquisitionDeletions records intent before the selected occurrence
-// identities and their RAW are destroyed. Both purge entry points use the same
-// statement inside their deletion transaction. Record even IDs without prior
-// debt: an in-flight failure can become their first diagnostic after the purge.
-func (s *Store) recordDedupAcquisitionDeletions(ctx context.Context, tx *loggedTx, batchID *string) error {
-	scope := "messages.delete_batch_id IS NOT NULL"
-	args := []any{AcquisitionReplayLocalDeletion, "Gmail message explicitly removed in local dedup cleanup"}
-	if batchID != nil {
-		scope = "messages.delete_batch_id = ?"
-		args = append(args, *batchID)
-	}
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-				INSERT INTO sync_run_items (
-					sync_run_id, source_message_id, phase, status, error_kind, error_message, created_at
-				)
-				SELECT (
-					SELECT id FROM sync_runs WHERE source_id = messages.source_id ORDER BY id DESC LIMIT 1
-				), messages.source_message_id, 'fetch', 'skipped', ?, ?, %s
-				FROM messages
-				JOIN sources src ON src.id = messages.source_id AND src.source_type = 'gmail'
-				WHERE messages.deleted_at IS NOT NULL AND %s
-				  AND EXISTS (SELECT 1 FROM sync_runs run WHERE run.source_id = messages.source_id)
-			`, s.dialect.Now(), scope), args...)
-	if err != nil {
-		return fmt.Errorf("record Gmail acquisition resolution before dedup deletion: %w", err)
-	}
-	return nil
+	return result.RowsAffected()
 }
 
 // DeleteDedupedBatch permanently deletes all hidden rows associated with a
@@ -812,15 +775,7 @@ func (s *Store) DeleteDedupedBatchesContext(
 	// (finding S1). No-op timeout reset on SQLite.
 	var deleted int64
 	err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
-		// Match message persistence/resolution's identity lock order. Holding
-		// this through journal + DELETE excludes stale acquisition commits.
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
 		for _, batchID := range batchIDs {
-			if err := s.recordDedupAcquisitionDeletions(ctx, tx, &batchID); err != nil {
-				return err
-			}
 			result, err := tx.ExecContext(ctx, `
 				DELETE FROM messages
 				WHERE delete_batch_id = ? AND deleted_at IS NOT NULL
@@ -919,23 +874,15 @@ func (s *Store) DeleteAllDedupedContext(
 	// runMaintenance wraps the count + cascade DELETE in one transaction with
 	// the pool-wide 30s statement_timeout disabled: the unbounded cascade
 	// DELETE exceeds 30s on a large archive (finding S1). The count and the
-	// delete share the identity lock below with MergeDuplicates and UndoDedup,
-	// keeping their population stable even under PostgreSQL READ COMMITTED.
+	// delete share the tx so they observe the same snapshot, as before.
 	// No-op timeout reset on SQLite.
 	err = s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
 		if err := tx.QueryRowContext(ctx, `
 			SELECT COUNT(DISTINCT delete_batch_id)
 			FROM messages
 			WHERE deleted_at IS NOT NULL AND delete_batch_id IS NOT NULL
 		`).Scan(&distinctBatches); err != nil {
 			return fmt.Errorf("delete all dedup-hidden: count batches: %w", err)
-		}
-
-		if err := s.recordDedupAcquisitionDeletions(ctx, tx, nil); err != nil {
-			return err
 		}
 
 		result, err := tx.ExecContext(ctx, `
