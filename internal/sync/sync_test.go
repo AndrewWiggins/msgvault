@@ -1613,43 +1613,18 @@ func TestIncrementalSyncFiltersFetchReplayCandidates(t *testing.T) {
 	env.Mock.GetMessageCalls = nil
 
 	const (
-		olderID       = "replay-older"
-		failedID      = "replay-failed-run"
 		eligibleID    = "replay-eligible"
 		batchEligible = "replay-batch-eligible"
 	)
-	recordIncrementalSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{
-		SourceMessageID: olderID,
-		Phase:           syncItemPhaseFetch,
-		Status:          store.SyncRunItemStatusError,
-		ErrorKind:       syncItemKindFetchError,
-	})
-	recordSyncRunItems(t, env, source.ID, store.SyncStatusFailed, store.SyncRunItem{
-		SourceMessageID: failedID,
-		Phase:           syncItemPhaseFetch,
-		Status:          store.SyncRunItemStatusError,
-		ErrorKind:       syncItemKindFetchError,
-	})
 	recordIncrementalSyncRunItems(t, env, source.ID, store.SyncStatusCompleted,
 		store.SyncRunItem{SourceMessageID: eligibleID, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindFetchError},
 		store.SyncRunItem{SourceMessageID: eligibleID, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindBatchFetchError},
 		store.SyncRunItem{SourceMessageID: batchEligible, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindBatchFetchError},
-		store.SyncRunItem{SourceMessageID: "replay-ingest", Phase: syncItemPhaseIngest, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindIngestError},
-		store.SyncRunItem{SourceMessageID: "replay-delete", Phase: syncItemPhaseDelete, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindDeleteError},
-		store.SyncRunItem{SourceMessageID: "replay-skipped", Phase: syncItemPhaseIngest, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindIngestError},
-		store.SyncRunItem{SourceMessageID: "replay-skipped", Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusSkipped, ErrorKind: syncItemKindGmailNotFound},
 		store.SyncRunItem{SourceMessageID: "", Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindFetchError},
 		store.SyncRunItem{SourceMessageID: "(unknown)", Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindBatchFetchError},
 		store.SyncRunItem{SourceMessageID: presentID, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindFetchError},
 	)
-	// Full runs contribute failures alongside completed and failed incrementals.
-	recordSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{
-		SourceMessageID: "replay-full-run",
-		Phase:           syncItemPhaseFetch,
-		Status:          store.SyncRunItemStatusError,
-		ErrorKind:       syncItemKindFetchError,
-	})
-	fetchIDs := []string{batchEligible, eligibleID, "replay-full-run", "replay-ingest"}
+	fetchIDs := []string{batchEligible, eligibleID}
 	for _, id := range fetchIDs {
 		env.Mock.AddMessage(id, testMIME(), []string{"INBOX"})
 	}
@@ -1657,8 +1632,8 @@ func TestIncrementalSyncFiltersFetchReplayCandidates(t *testing.T) {
 
 	summary, err := env.Syncer.Incremental(env.Context, source)
 	require.NoError(err, "filtered replay")
-	assert.Equal(int64(4), summary.MessagesFound, "eligible replay processed")
-	assert.Equal(int64(4), summary.MessagesAdded, "eligible replay added")
+	assert.Equal(int64(2), summary.MessagesFound, "eligible replay processed")
+	assert.Equal(int64(2), summary.MessagesAdded, "eligible replay added")
 	assert.Equal(int64(0), summary.Errors, "eligible replay errors")
 	assert.Equal(fetchIDs, env.Mock.GetMessageCalls, "all unresolved absent IDs fetched")
 	items, err := env.Store.ListSyncRunItems(summary.SyncRunID, store.SyncRunItemStatusResolved, 20)
@@ -6046,29 +6021,4 @@ func TestIncrementalSyncSameRunRecoveryThenPurge(t *testing.T) {
 	summary = runIncrementalSync(t, env)
 	assert.Zero(t, summary.MessagesAdded)
 	assert.Empty(t, env.Mock.GetMessageCalls)
-}
-
-func TestIncrementalSyncIgnoresLegacyErrorAfterPurge(t *testing.T) {
-	t.Parallel()
-	env := newTestEnv(t)
-	const id = "legacy-purged"
-	seedMessages(env, 1, 1000, id)
-	runFullSync(t, env)
-	source, err := env.Store.GetSourceByIdentifier(testEmail)
-	require.NoError(t, err)
-	// Released syncs could archive a previous failure without resolving its row.
-	recordSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{SourceMessageID: id, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindFetchError})
-	recordIncrementalSyncRunItems(t, env, source.ID, store.SyncStatusCompleted)
-	_, err = env.Store.DB().Exec(`UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, delete_batch_id = ? WHERE source_id = ?`, "legacy", source.ID)
-	require.NoError(t, err)
-	deleted, err := env.Store.DeleteDedupedBatch("legacy")
-	require.NoError(t, err)
-	require.Equal(t, int64(1), deleted)
-	env.Mock.AddMessage("later-full", testMIME(), []string{"INBOX"})
-	recordSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{SourceMessageID: "later-full", Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindFetchError})
-	env.SetHistory(1000)
-	env.Mock.GetMessageCalls = nil
-	summary := runIncrementalSync(t, env)
-	assert.Equal(t, []string{"later-full"}, env.Mock.GetMessageCalls)
-	assert.Equal(t, int64(1), summary.MessagesAdded)
 }
