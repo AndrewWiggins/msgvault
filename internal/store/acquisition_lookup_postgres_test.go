@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -102,7 +103,6 @@ func TestAcquisitionLifecyclePostgresStatistics(t *testing.T) {
 					queries = trace.take()
 					must.Len(queries, 1)
 				}
-				must.Len(queries, 1)
 				var dispositions, foreign int
 				must.NoError(st.DB().QueryRow(st.Rebind(`SELECT count(*), count(*) FILTER (WHERE sync_run_id<>?)
 					FROM sync_run_items WHERE id>?`), runs[0], seedMax).Scan(&dispositions, &foreign))
@@ -113,7 +113,17 @@ func TestAcquisitionLifecyclePostgresStatistics(t *testing.T) {
 				var explained string
 				must.NoError(statsTx.QueryRowContext(t.Context(), "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].statement,
 					sources[0], string(encoded)).Scan(&explained))
-				checkAcquisitionLookupHashedPlan(t, explained, count)
+				checkAcquisitionLookupRequestTraversals(t, explained, count)
+				if statistics == "present" && count == 500 {
+					// An equivalent semijoin can also read the request once. The
+					// regression guard must accept it without requiring a specific
+					// join type or PostgreSQL's rendered "hashed SubPlan" text.
+					alternate := strings.Replace(queries[0].statement, " IS TRUE", "", 1)
+					var alternatePlan string
+					must.NoError(statsTx.QueryRowContext(t.Context(), "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+alternate,
+						sources[0], string(encoded)).Scan(&alternatePlan))
+					checkAcquisitionLookupRequestTraversals(t, alternatePlan, count)
+				}
 				if os.Getenv("MSGVAULT_TEST_ACQUISITION_PERF") == "1" {
 					t.Logf("statistics-plan state=%s ids=%d %s", statistics, count, explained)
 				}
@@ -125,7 +135,7 @@ func TestAcquisitionLifecyclePostgresStatistics(t *testing.T) {
 				must.NoError(err)
 				must.NoError(statsTx.QueryRowContext(t.Context(), fmt.Sprintf(
 					"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE acquisition_lookup(%d,'%s')", sources[0], encoded)).Scan(&explained))
-				checkAcquisitionLookupHashedPlan(t, explained, count)
+				checkAcquisitionLookupRequestTraversals(t, explained, count)
 				_, err = statsTx.Exec("DEALLOCATE acquisition_lookup")
 				must.NoError(err)
 				_, err = statsTx.Exec("RESET plan_cache_mode")
@@ -137,11 +147,13 @@ func TestAcquisitionLifecyclePostgresStatistics(t *testing.T) {
 	}
 }
 
-func checkAcquisitionLookupHashedPlan(t *testing.T, explained string, count int) {
+func checkAcquisitionLookupRequestTraversals(t *testing.T, explained string, count int) {
 	t.Helper()
 	type node struct {
+		Type     string  `json:"Node Type"`
 		Function string  `json:"Function Name"`
-		Filter   string  `json:"Filter"`
+		Subplan  string  `json:"Subplan Name"`
+		CTE      string  `json:"CTE Name"`
 		Loops    float64 `json:"Actual Loops"`
 		Rows     float64 `json:"Actual Rows"`
 		Workers  int     `json:"Workers Launched"`
@@ -153,23 +165,48 @@ func checkAcquisitionLookupHashedPlan(t *testing.T, explained string, count int)
 	must := require.New(t)
 	must.NoError(json.Unmarshal([]byte(explained), &plans))
 	must.Len(plans, 1)
-	functions, workers := 0, 1
-	hashed := false
+	workers := 1
+	var nodes []node
 	var visit func(node)
 	visit = func(n node) {
 		workers += n.Workers
-		hashed = hashed || strings.Contains(n.Filter, "hashed SubPlan")
+		nodes = append(nodes, n)
+		for _, child := range n.Plans {
+			visit(child)
+		}
+	}
+	visit(plans[0].Plan)
+	// Materializing JSON once is insufficient if its rows are then rescanned
+	// per event. Follow request CTEs as well as inline materialization, without
+	// constraining the join, aggregate, sort or index chosen by PostgreSQL.
+	requestCTEs := make(map[string]bool)
+	var containsRequest func(node) bool
+	containsRequest = func(n node) bool {
+		if n.Function == "jsonb_array_elements_text" || requestCTEs[n.CTE] {
+			return true
+		}
+		return slices.ContainsFunc(n.Plans, containsRequest)
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, n := range nodes {
+			if name, found := strings.CutPrefix(n.Subplan, "CTE "); found && !requestCTEs[name] && containsRequest(n) {
+				requestCTEs[name] = true
+				changed = true
+			}
+		}
+	}
+	functions := 0
+	for _, n := range nodes {
 		if n.Function == "jsonb_array_elements_text" {
 			functions++
 			// Each parallel worker may own one copy. No rescan per event.
 			must.LessOrEqual(n.Loops, float64(workers))
 			must.InDelta(count, n.Rows, 0)
 		}
-		for _, child := range n.Plans {
-			visit(child)
+		if requestCTEs[n.CTE] || (n.Type == "Materialize" && containsRequest(n)) {
+			must.LessOrEqual(n.Loops, float64(workers), "materialized request must not be rescanned per event: %s", explained)
 		}
 	}
-	visit(plans[0].Plan)
 	must.Equal(1, functions)
-	must.True(hashed, "request membership must remain a hashed subplan: %s", explained)
 }
