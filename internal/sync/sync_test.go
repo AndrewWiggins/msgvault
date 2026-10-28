@@ -5896,6 +5896,8 @@ func TestIMAPGoneUIDIsArchivedOnceTheServerReturnsIt(t *testing.T) {
 
 func TestIncrementalSyncReplaysEarlierRunFailures(t *testing.T) {
 	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
 	env := newTestEnv(t)
 	seedMessages(env, 3, 1000, "lost-fetch", "lost-ingest", "good")
 	env.Mock.GetMessageError["lost-fetch"] = errors.New("temporary fetch failure")
@@ -5908,35 +5910,37 @@ func TestIncrementalSyncReplaysEarlierRunFailures(t *testing.T) {
 		env.Mock.AddMessage(id, testMIME(), []string{"INBOX"})
 	}
 	source, err := env.Store.GetSourceByIdentifier(testEmail)
-	require.NoError(t, err)
+	require.NoError(err)
 	env.SetHistory(1000)
 	env.Mock.GetMessageCalls = nil
 	summary, err = env.Syncer.Incremental(env.Context, source)
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), summary.MessagesAdded)
-	assert.Equal(t, int64(0), summary.Errors)
-	assert.ElementsMatch(t, []string{"lost-fetch", "lost-ingest"}, env.Mock.GetMessageCalls)
+	require.NoError(err)
+	assert.Equal(int64(2), summary.MessagesAdded)
+	assert.Equal(int64(0), summary.Errors)
+	assert.ElementsMatch([]string{"lost-fetch", "lost-ingest"}, env.Mock.GetMessageCalls)
 	existing, err := env.Store.MessageExistsBatch(source.ID, []string{"lost-fetch", "lost-ingest"})
-	require.NoError(t, err)
-	assert.Len(t, existing, 2)
+	require.NoError(err)
+	assert.Len(existing, 2)
 
 	env.Mock.GetMessageCalls = nil
 	_, err = env.Syncer.Incremental(env.Context, source)
-	require.NoError(t, err)
-	assert.Empty(t, env.Mock.GetMessageCalls)
+	require.NoError(err)
+	assert.Empty(env.Mock.GetMessageCalls)
 }
 
 func TestIncrementalSyncDoesNotReacquirePurgedMessage(t *testing.T) {
 	for _, recovery := range []string{"full", "history", "replay"} {
 		t.Run(recovery, func(t *testing.T) {
 			t.Parallel()
+			require := require.New(t)
+			assert := assert.New(t)
 			env := newTestEnv(t)
 			const messageID = "recovered-purged"
 			if recovery == "full" {
 				seedMessages(env, 1, 1000, messageID)
 				env.Mock.GetMessageError[messageID] = errors.New("temporary fetch failure")
 				summary := runFullSync(t, env)
-				require.Equal(t, int64(1), summary.Errors)
+				require.Equal(int64(1), summary.Errors)
 				delete(env.Mock.GetMessageError, messageID)
 			} else {
 				seedReplaySource(t, env, messageID)
@@ -5956,29 +5960,29 @@ func TestIncrementalSyncDoesNotReacquirePurgedMessage(t *testing.T) {
 			} else {
 				summary = runIncrementalSync(t, env)
 			}
-			require.Equal(t, int64(1), summary.MessagesAdded)
+			require.Equal(int64(1), summary.MessagesAdded)
 			if recovery == "history" {
-				require.Equal(t, int64(1), summary.Errors, "replay failed before History recovered the message")
+				require.Equal(int64(1), summary.Errors, "replay failed before History recovered the message")
 			} else {
-				require.Zero(t, summary.Errors)
+				require.Zero(summary.Errors)
 			}
 			source, err := env.Store.GetSourceByIdentifier(testEmail)
-			require.NoError(t, err)
+			require.NoError(err)
 			_, err = env.Store.DB().Exec(`UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, delete_batch_id = ? WHERE source_id = ? AND source_message_id = ?`, "purge-recovered", source.ID, messageID)
-			require.NoError(t, err)
+			require.NoError(err)
 			deleted, err := env.Store.DeleteDedupedBatch("purge-recovered")
-			require.NoError(t, err)
-			require.Equal(t, int64(1), deleted)
+			require.NoError(err)
+			require.Equal(int64(1), deleted)
 			existing, err := env.Store.MessageExistsBatch(source.ID, []string{messageID})
-			require.NoError(t, err)
-			require.Empty(t, existing)
+			require.NoError(err)
+			require.Empty(existing)
 
 			env.SetHistory(env.Mock.Profile.HistoryID)
 			env.Mock.GetMessageCalls = nil
 			summary = runIncrementalSync(t, env)
-			assert.Equal(t, int64(0), summary.Errors)
-			assert.Equal(t, int64(0), summary.MessagesAdded)
-			assert.Empty(t, env.Mock.GetMessageCalls)
+			assert.Equal(int64(0), summary.Errors)
+			assert.Equal(int64(0), summary.MessagesAdded)
+			assert.Empty(env.Mock.GetMessageCalls)
 		})
 	}
 }
@@ -5996,6 +6000,8 @@ func (a *recoveringLabelAPI) GetMessageRaw(ctx context.Context, id string) (*gma
 
 func TestIncrementalSyncSameRunRecoveryThenPurge(t *testing.T) {
 	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
 	env := newTestEnv(t)
 	source := env.CreateSourceWithHistory(t, "1000")
 	const id = "same-run-purged"
@@ -6005,20 +6011,20 @@ func TestIncrementalSyncSameRunRecoveryThenPurge(t *testing.T) {
 	event := gmail.HistoryRecord{LabelsAdded: []gmail.HistoryLabelChange{{Message: gmail.MessageID{ID: id, ThreadID: "thread"}, LabelIDs: []string{"INBOX"}}}}
 	env.SetHistory(1001, event, event)
 	summary := runIncrementalSync(t, env)
-	require.Equal(t, int64(1), summary.Errors)
-	require.Equal(t, int64(1), summary.MessagesAdded)
-	assert.Equal(t, []string{id, id}, env.Mock.GetMessageCalls)
+	require.Equal(int64(1), summary.Errors)
+	require.Equal(int64(1), summary.MessagesAdded)
+	assert.Equal([]string{id, id}, env.Mock.GetMessageCalls)
 	items, err := env.Store.ListSyncRunItems(summary.SyncRunID, store.SyncRunItemStatusResolved, 10)
-	require.NoError(t, err)
-	assert.Len(t, items, 1)
+	require.NoError(err)
+	assert.Len(items, 1)
 	_, err = env.Store.DB().Exec(`UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, delete_batch_id = ? WHERE source_id = ?`, "same-run", source.ID)
-	require.NoError(t, err)
+	require.NoError(err)
 	deleted, err := env.Store.DeleteDedupedBatch("same-run")
-	require.NoError(t, err)
-	require.Equal(t, int64(1), deleted)
+	require.NoError(err)
+	require.Equal(int64(1), deleted)
 	env.SetHistory(1001)
 	env.Mock.GetMessageCalls = nil
 	summary = runIncrementalSync(t, env)
-	assert.Zero(t, summary.MessagesAdded)
-	assert.Empty(t, env.Mock.GetMessageCalls)
+	assert.Zero(summary.MessagesAdded)
+	assert.Empty(env.Mock.GetMessageCalls)
 }
