@@ -66,12 +66,18 @@ func (s *Syncer) incrementalWithRecovery(
 	}
 
 	var predecessorID int64
+	var acquisition *recoveryCounts
 	if recovery {
 		prior, err := s.store.GetLatestCheckpointedSync(source.ID)
 		if err != nil {
 			return nil, fmt.Errorf("find Gmail catch-up predecessor: %w", err)
 		}
 		predecessorID = prior.ID
+		cp, err := decodeRecoveryCheckpoint(prior.CursorBefore.String)
+		if err != nil {
+			return nil, err
+		}
+		acquisition = cp.Acquisition
 	}
 
 	// Start sync
@@ -103,7 +109,10 @@ func (s *Syncer) incrementalWithRecovery(
 
 	checkpoint := &store.Checkpoint{}
 	if recovery {
-		state := &syncState{checkpoint: checkpoint, recoveryPhase: recoveryCatchup, handoffCursor: source.SyncCursor.String, predecessorID: predecessorID}
+		state := &syncState{
+			checkpoint: checkpoint, recoveryPhase: recoveryCatchup, acquisition: acquisition,
+			handoffCursor: source.SyncCursor.String, predecessorID: predecessorID,
+		}
 		checkpoint = state.durableCheckpoint()
 		if err := s.store.UpdateSyncCheckpointContext(ctx, syncID, checkpoint); err != nil {
 			s.failStoppedSync(syncID, err)

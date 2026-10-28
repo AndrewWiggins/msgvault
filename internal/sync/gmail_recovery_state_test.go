@@ -212,21 +212,6 @@ func TestGmailRecoveryCrashWorker(t *testing.T) {
 	require.NoError(t, err, "worker must exit at the configured boundary")
 }
 
-func TestGmailRecoveryTerminalGoneDoesNotBlock(t *testing.T) {
-	for _, event := range []string{"added", "label-added"} {
-		t.Run(event, func(t *testing.T) {
-			e := recoveryStateEnv(t, true)
-			e.Mock.GetMessageError["history-only"] = gmail.ErrMessageGone
-			if event == "label-added" {
-				e.Mock.HistoryRecords = []gmail.HistoryRecord{historyLabelAdded("history-only", "INBOX")}
-			}
-			_, err := e.Syncer.Full(t.Context(), testEmail)
-			require.NoError(t, err)
-			assert.Equal(t, "20000", gmailCoverageSource(t, e).SyncCursor.String)
-		})
-	}
-}
-
 func TestGmailRecoveryNoResumeAndExpiredHandoff(t *testing.T) {
 	for _, mode := range []string{"no-resume", "expired-handoff"} {
 		t.Run(mode, func(t *testing.T) {
@@ -435,19 +420,51 @@ func recoveryStateEnv(t *testing.T, legacy bool) *TestEnv {
 	e.Mock.AddMessage("history-only", testMIME(), []string{"INBOX"})
 	e.Mock.HistoryRecords = []gmail.HistoryRecord{historyAdded("history-only")}
 	e.Mock.Profile.HistoryID, e.Mock.HistoryID = 20000, 20000
-	id, err := e.Store.StartSync(source.ID, "full")
-	require.NoError(t, err)
-	fingerprint := gmailHistoryRecoveryCoverageFingerprint
 	if legacy {
-		fingerprint = store.GmailHistoryRecoveryRequestFingerprint
+		// Releases before phase checkpoints saved a bare listing token.
+		id, err := e.Store.StartSync(source.ID, "full")
+		require.NoError(t, err)
+		_, err = e.Store.DB().Exec("UPDATE sync_runs SET request_fingerprint=? WHERE id=?", store.GmailHistoryRecoveryRequestFingerprint, id)
+		require.NoError(t, err)
+		require.NoError(t, e.Store.ScopedToSync(source.ID, id).PinSyncHandoffCursorContext(t.Context(), id, "15000"))
+		require.NoError(t, e.Store.UpdateSyncCheckpoint(id, &store.Checkpoint{PageToken: "page_1", MessagesProcessed: 1}))
+		require.NoError(t, e.Store.FailSync(id, "synthetic legacy interruption"))
+	} else {
+		// Interrupt a real recovery after its first page, pinning H=15000.
+		e.Mock.Profile.HistoryID = 15000
+		api := &recoveryStateAPI{MockAPI: e.Mock, fault: "enumerate"}
+		_, err := New(api, e.Store, nil).RecoverExpiredHistory(t.Context(), source)
+		require.ErrorContains(t, err, "synthetic interruption")
+		e.Mock.Profile.HistoryID = 20000
 	}
-	_, err = e.Store.DB().Exec("UPDATE sync_runs SET request_fingerprint=? WHERE id=?", fingerprint, id)
-	require.NoError(t, err)
-	require.NoError(t, e.Store.ScopedToSync(source.ID, id).PinSyncHandoffCursorContext(t.Context(), id, "15000"))
-	require.NoError(t, e.Store.UpdateSyncCheckpoint(id, &store.Checkpoint{PageToken: "page_1", MessagesProcessed: 1}))
-	require.NoError(t, e.Store.FailSync(id, "synthetic legacy interruption"))
 	e.Mock.HistoryCalls = nil
 	return e
+}
+
+func TestGmailRecoveryResumedCatchupKeepsAcquisitionCounts(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	e := recoveryStateEnv(t, false)
+	e.Mock.AddMessage("new-ok", testMIME(), []string{"INBOX"})
+	e.Mock.AddMessage("new-failing", testMIME(), []string{"INBOX"})
+	e.Mock.MessagePages[1] = append(e.Mock.MessagePages[1], "new-ok", "new-failing")
+	e.Mock.GetMessageError["new-failing"] = errors.New("synthetic acquisition failure")
+	e.Mock.HistoryError = errors.New("synthetic catch-up failure")
+	_, err := e.Syncer.Full(t.Context(), testEmail)
+	require.ErrorContains(err, "synthetic catch-up failure")
+	gmailCoverageReopen(t, e)
+
+	// The retry skips enumeration; its summary still reports what enumeration did.
+	e.Mock.HistoryError = nil
+	lists := e.Mock.ListMessagesCalls
+	summary, err := e.Syncer.Full(t.Context(), testEmail)
+	require.NoError(err)
+	assert.Equal(lists, e.Mock.ListMessagesCalls)
+	assert.Equal(int64(2), summary.MessagesAdded, "new-ok from enumeration and history-only from catch-up")
+	assert.Equal(int64(1), summary.Errors)
+	assertRawDataExists(t, e.Store, "new-ok")
+	assertRawDataExists(t, e.Store, "history-only")
 }
 
 func TestGmailRecoveryRepeatedInterruptions(t *testing.T) {

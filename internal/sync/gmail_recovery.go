@@ -36,12 +36,25 @@ const (
 type recoveryCheckpoint struct {
 	Phase     string `json:"phase"`
 	PageToken string `json:"page_token,omitempty"`
+	// Acquisition carries enumeration totals through catch-up. Each catch-up
+	// retry replays History from H, so its own counts replace the previous
+	// attempt's; the final summary adds them to these totals.
+	Acquisition *recoveryCounts `json:"acquisition,omitempty"`
+}
+
+type recoveryCounts struct {
+	Processed int64 `json:"processed"`
+	Added     int64 `json:"added"`
+	Updated   int64 `json:"updated"`
+	Errors    int64 `json:"errors"`
 }
 
 func (state *syncState) durableCheckpoint() *store.Checkpoint {
 	cp := *state.checkpoint
 	if state.recoveryPhase != "" {
-		encoded, _ := json.Marshal(recoveryCheckpoint{Phase: state.recoveryPhase, PageToken: cp.PageToken})
+		encoded, _ := json.Marshal(recoveryCheckpoint{
+			Phase: state.recoveryPhase, PageToken: cp.PageToken, Acquisition: state.acquisition,
+		})
 		cp.PageToken = recoveryCheckpointPrefix + string(encoded)
 		cp.HandoffCursor = state.handoffCursor
 		cp.InheritFromSyncID = state.predecessorID
@@ -53,37 +66,57 @@ func (s *Syncer) saveFullCheckpoint(ctx context.Context, state *syncState) error
 	return s.store.UpdateSyncCheckpointContext(ctx, state.syncID, state.durableCheckpoint())
 }
 
+// decodeRecoveryCheckpoint reads the phase envelope saved in cursor_before.
+func decodeRecoveryCheckpoint(token string) (recoveryCheckpoint, error) {
+	if !strings.HasPrefix(token, "gmail-recovery:") {
+		return recoveryCheckpoint{Phase: recoveryEnumerate, PageToken: token}, nil
+	}
+	if !strings.HasPrefix(token, recoveryCheckpointPrefix) {
+		return recoveryCheckpoint{}, errors.New("unsupported Gmail recovery checkpoint version")
+	}
+	var cp recoveryCheckpoint
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(token, recoveryCheckpointPrefix)), &cp); err != nil {
+		return recoveryCheckpoint{}, fmt.Errorf("decode Gmail recovery checkpoint: %w", err)
+	}
+	switch cp.Phase {
+	case recoveryEnumerate, recoveryReconcile, recoveryCatchup:
+	default:
+		return recoveryCheckpoint{}, fmt.Errorf("unknown Gmail recovery phase %q", cp.Phase)
+	}
+	if cp.Phase != recoveryEnumerate && cp.PageToken != "" {
+		return recoveryCheckpoint{}, fmt.Errorf("unexpected page token in Gmail recovery phase %q", cp.Phase)
+	}
+	return cp, nil
+}
+
 func restoreRecoveryCheckpoint(state *syncState, run *store.SyncRun) error {
 	state.recoveryPhase = recoveryEnumerate
 	if !checkpointMatchesRequest(run, gmailHistoryRecoveryCoverageFingerprint) {
 		return nil // The narrower legacy listing must restart, keeping H.
 	}
-	token := run.CursorBefore.String
-	if strings.HasPrefix(token, "gmail-recovery:") && !strings.HasPrefix(token, recoveryCheckpointPrefix) {
-		return errors.New("unsupported Gmail recovery checkpoint version")
+	cp, err := decodeRecoveryCheckpoint(run.CursorBefore.String)
+	if err != nil {
+		return err
 	}
-	if strings.HasPrefix(token, recoveryCheckpointPrefix) {
-		var cp recoveryCheckpoint
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(token, recoveryCheckpointPrefix)), &cp); err != nil {
-			return fmt.Errorf("decode Gmail recovery checkpoint: %w", err)
-		}
-		switch cp.Phase {
-		case recoveryEnumerate, recoveryReconcile, recoveryCatchup:
-		default:
-			return fmt.Errorf("unknown Gmail recovery phase %q", cp.Phase)
-		}
-		if cp.Phase != recoveryEnumerate && cp.PageToken != "" {
-			return fmt.Errorf("unexpected page token in Gmail recovery phase %q", cp.Phase)
-		}
-		state.recoveryPhase, token = cp.Phase, cp.PageToken
-	}
-	state.pageToken = token
+	state.recoveryPhase, state.pageToken = cp.Phase, cp.PageToken
 	state.checkpoint = &store.Checkpoint{
-		PageToken:         token,
+		PageToken:         cp.PageToken,
 		MessagesProcessed: run.MessagesProcessed,
 		MessagesAdded:     run.MessagesAdded,
 		MessagesUpdated:   run.MessagesUpdated,
 		ErrorsCount:       run.ErrorsCount,
+	}
+	if cp.Phase == recoveryCatchup {
+		// The prior run may be a failed catch-up whose counters cover only
+		// History replay. Report the enumeration totals instead.
+		state.acquisition = cp.Acquisition
+		if state.acquisition == nil {
+			state.acquisition = &recoveryCounts{}
+		}
+		state.checkpoint.MessagesProcessed = state.acquisition.Processed
+		state.checkpoint.MessagesAdded = state.acquisition.Added
+		state.checkpoint.MessagesUpdated = state.acquisition.Updated
+		state.checkpoint.ErrorsCount = state.acquisition.Errors
 	}
 	return nil
 }

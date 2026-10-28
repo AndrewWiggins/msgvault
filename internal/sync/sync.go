@@ -441,6 +441,7 @@ type syncState struct {
 	pageToken     string
 	handoffCursor string
 	recoveryPhase string
+	acquisition   *recoveryCounts
 	predecessorID int64
 	wasResumed    bool
 }
@@ -1520,6 +1521,12 @@ func (s *Syncer) full(
 			s.logger.Info("reconciled Gmail source deletions", "source_id", source.ID, "messages", reconciled)
 		}
 		state.recoveryPhase = recoveryCatchup
+		state.acquisition = &recoveryCounts{
+			Processed: state.checkpoint.MessagesProcessed,
+			Added:     state.checkpoint.MessagesAdded,
+			Updated:   state.checkpoint.MessagesUpdated,
+			Errors:    state.checkpoint.ErrorsCount,
+		}
 		if err := s.saveFullCheckpoint(ctx, state); err != nil {
 			s.failStoppedSync(state.syncID, err)
 			return nil, fmt.Errorf("checkpoint Gmail catch-up phase: %w", err)
