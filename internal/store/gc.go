@@ -103,7 +103,26 @@ func equalGCPlans(a, b GCPlan) bool {
 // recordGCSourceDeletedAcquisitions reuses the GC plan already checked in this
 // transaction. Each bounded lookup visits only that page's primary keys, rather
 // than scanning and sorting the remaining purge population again for each page.
+// Journal state is loaded at most once per Gmail source, restricted to that
+// plan's identities. Its total size is bounded by the plan, not by journal size;
+// candidate rows remain in pages of 500 rather than an additional full Go slice.
 func (s *Store) recordGCSourceDeletedAcquisitions(ctx context.Context, tx *loggedTx, messageIDs []int64) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	// Unlike provider deletion, GC already has a validated set of existing
+	// message rows. Reuse the plan's exact eligibility predicate in this same
+	// transaction, before any message removal. The source/deletion index bounds
+	// this set without copying all native IDs or re-decoding the complete plan
+	// for each source. The journal still uses source/native identity.
+	idsQuery := `SELECT source_message_id FROM messages
+		WHERE source_id = ? AND deleted_from_source_at IS NOT NULL
+		  AND NOT (` + managedDraftRetainedMessageSQL + `)`
+	type sourceState struct {
+		runID       int64
+		latestKinds map[string]string
+	}
+	states := make(map[int64]sourceState)
 	for start := 0; start < len(messageIDs); start += acquisitionReplayLookupBatchSize {
 		end := min(start+acquisitionReplayLookupBatchSize, len(messageIDs))
 		chunk := messageIDs[start:end]
@@ -142,8 +161,25 @@ func (s *Store) recordGCSourceDeletedAcquisitions(ctx context.Context, tx *logge
 		}
 		slices.Sort(sourceIDs)
 		for _, sourceID := range sourceIDs {
-			if err := s.recordAcquisitionReplayDispositionsWith(
-				ctx, tx, sourceID, idsBySource[sourceID],
+			state, loaded := states[sourceID]
+			if !loaded {
+				state.runID, err = s.acquisitionReplayDispositionRunIDWith(ctx, tx, sourceID)
+				if err != nil {
+					return err
+				}
+				if state.runID != 0 {
+					state.latestKinds, err = s.acquisitionReplayLatestKindsWith(ctx, tx, sourceID, idsQuery, sourceID)
+					if err != nil {
+						return err
+					}
+				}
+				states[sourceID] = state
+			}
+			if state.runID == 0 {
+				continue
+			}
+			if err := s.recordAcquisitionReplayDispositionsForRunWith(
+				ctx, tx, state.runID, idsBySource[sourceID], state.latestKinds,
 				AcquisitionReplaySourceDeleted,
 				"Gmail source deletion retained before local garbage collection",
 			); err != nil {
