@@ -1322,7 +1322,7 @@ func TestStore_ListUnresolvedSyncItemErrors(t *testing.T) {
 		require.NoError(t, f.Store.RecordSyncRunItem(item))
 	}
 
-	items, err := f.Store.ListUnresolvedSyncItemErrors(context.Background(), f.Source.ID, []string{"fetch", "ingest"})
+	items, err := f.Store.ListUnresolvedSyncItemErrors(context.Background(), f.Source.ID)
 	require.NoError(t, err)
 	require.Len(t, items, 2)
 	assert.Equal(t, "retry", items[0].SourceMessageID)

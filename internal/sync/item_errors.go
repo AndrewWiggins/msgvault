@@ -27,10 +27,9 @@ const (
 // isAcquisitionReplayCandidate reports whether a failed fetch or ingest names
 // a usable Gmail message ID.
 func isAcquisitionReplayCandidate(item store.SyncRunItem) bool {
-	return item.Status == store.SyncRunItemStatusError &&
-		((item.Phase == syncItemPhaseFetch &&
-			(item.ErrorKind == syncItemKindFetchError || item.ErrorKind == syncItemKindBatchFetchError)) ||
-			(item.Phase == syncItemPhaseIngest && item.ErrorKind == syncItemKindIngestError)) &&
+	return ((item.Phase == syncItemPhaseFetch &&
+		(item.ErrorKind == syncItemKindFetchError || item.ErrorKind == syncItemKindBatchFetchError)) ||
+		(item.Phase == syncItemPhaseIngest && item.ErrorKind == syncItemKindIngestError)) &&
 		item.SourceMessageID != "" && item.SourceMessageID != "(unknown)"
 }
 
@@ -118,25 +117,42 @@ func (s *Syncer) getMessagesRawBatchWithIdentityValidation(
 }
 
 func (s *Syncer) pendingFetchReplayIDs(sourceID int64) ([]string, error) {
-	items, err := s.store.ListUnresolvedSyncItemErrors(context.Background(), sourceID, []string{syncItemPhaseFetch, syncItemPhaseIngest})
+	items, err := s.store.ListUnresolvedSyncItemErrors(context.Background(), sourceID)
 	if err != nil {
 		return nil, fmt.Errorf("list unresolved acquisition errors: %w", err)
 	}
 
-	seen := make(map[string]struct{}, len(items))
 	ids := make([]string, 0, len(items))
 	for _, item := range items {
 		if !isAcquisitionReplayCandidate(item) {
 			continue
 		}
-		if _, ok := seen[item.SourceMessageID]; ok {
-			continue
-		}
-		seen[item.SourceMessageID] = struct{}{}
 		ids = append(ids, item.SourceMessageID)
 	}
 	sort.Strings(ids)
 	return ids, nil
+}
+
+// initAcquisitionReplay snapshots earlier failures for this run. Ordinary ingest
+// and replay both settle only IDs in this set.
+func (s *Syncer) initAcquisitionReplay(sourceID, syncID int64) ([]string, error) {
+	ids, err := s.pendingFetchReplayIDs(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	s.acquisitionSyncID = syncID
+	s.pendingAcquisitions = make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		s.pendingAcquisitions[id] = struct{}{}
+	}
+	return ids, nil
+}
+
+func (s *Syncer) resolveAcquisition(messageID string) {
+	if _, pending := s.pendingAcquisitions[messageID]; pending {
+		s.recordSyncItem(s.acquisitionSyncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusResolved, syncItemKindAcquired, nil)
+		delete(s.pendingAcquisitions, messageID)
+	}
 }
 
 func isGmailNotFound(err error) bool {

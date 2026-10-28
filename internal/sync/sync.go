@@ -96,6 +96,9 @@ type Syncer struct {
 	successfulHookName string
 	successfulHook     SuccessfulSyncHook
 
+	acquisitionSyncID   int64
+	pendingAcquisitions map[string]struct{}
+
 	// failedRelocationGuards holds run-scoped protection for forced
 	// relocation targets that failed this run. It is set only on the scoped
 	// Syncer copy a single full() run uses and never persists.
@@ -1333,6 +1336,13 @@ func (s *Syncer) full(
 	scoped.failedRelocationGuards = newFailedRelocationGuards()
 	s = &scoped
 	summary.SyncRunID = state.syncID
+
+	if s.opts.SourceType != sourceTypeIMAP {
+		if _, err := s.initAcquisitionReplay(source.ID, state.syncID); err != nil {
+			s.failStoppedSync(state.syncID, err)
+			return nil, fmt.Errorf("find pending fetch replays: %w", err)
+		}
+	}
 	summary.WasResumed = state.wasResumed
 	summary.ResumedFromToken = state.pageToken
 
@@ -2160,6 +2170,9 @@ func (s *Syncer) ingestMessage(
 		return false, err
 	}
 	messageID, err := s.persistMessage(data, labelMap)
+	if err == nil {
+		s.resolveAcquisition(raw.ID)
+	}
 	if err == nil && s.opts.RemoteImages != nil && data.message.MessageType == store.MessageTypeEmail {
 		archived := s.opts.RemoteImages.Archive(ctx, s.store, s.opts.AttachmentsDir, messageID, data.bodyHTML)
 		for _, imageErr := range archived.Errors {

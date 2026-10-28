@@ -58,12 +58,6 @@ func (s *Syncer) incrementalWithRecovery(
 		return nil, fmt.Errorf("invalid history ID %q: %w", source.SyncCursor.String, err)
 	}
 
-	// Read earlier acquisition failures before starting the next run.
-	pendingReplayIDs, err := s.pendingFetchReplayIDs(source.ID)
-	if err != nil {
-		return nil, fmt.Errorf("find pending fetch replays: %w", err)
-	}
-
 	var predecessorID int64
 	var acquisition *recoveryCounts
 	if recovery {
@@ -92,6 +86,12 @@ func (s *Syncer) incrementalWithRecovery(
 	scoped.store = s.store.ScopedToSync(source.ID, syncID)
 	s = &scoped
 	summary.SyncRunID = syncID
+
+	pendingReplayIDs, err := s.initAcquisitionReplay(source.ID, syncID)
+	if err != nil {
+		s.failStoppedSync(syncID, err)
+		return nil, fmt.Errorf("find pending fetch replays: %w", err)
+	}
 
 	// Defer failure handling — recover from panics and return as error
 	defer func() {
@@ -395,10 +395,9 @@ func (s *Syncer) incrementalWithRecovery(
 	return summary, nil
 }
 
-// replayFetchFailures re-fetches the IDs a prior completed incremental run
-// failed to read, skipping any that already reached the archive. Reads and
-// local ingest only; a repeated failure becomes this run's fetch error and
-// carries the ID to the next run.
+// replayFetchFailures retries earlier acquisition failures, skipping IDs that
+// already reached the archive. It fetches and ingests locally; repeated failures
+// remain eligible for the next run.
 func (s *Syncer) replayFetchFailures(
 	ctx context.Context,
 	syncID, sourceID int64,
@@ -420,7 +419,7 @@ func (s *Syncer) replayFetchFailures(
 		if _, ok := existing[messageID]; !ok {
 			fetchIDs = append(fetchIDs, messageID)
 		} else {
-			s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusResolved, syncItemKindAcquired, nil)
+			s.resolveAcquisition(messageID)
 		}
 	}
 	if len(fetchIDs) == 0 {
@@ -480,7 +479,6 @@ func (s *Syncer) replayFetchFailures(
 				checkpoint.ErrorsCount++
 				continue
 			}
-			s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusResolved, syncItemKindAcquired, nil)
 			checkpoint.MessagesAdded++
 			summary.BytesDownloaded += int64(len(result.Message.Raw))
 			successfulIDs = append(successfulIDs, messageID)
