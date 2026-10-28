@@ -94,10 +94,7 @@ type MessageDeliveryEvidence struct {
 // MessagePersistData bundles everything needed to atomically
 // persist a message and its related rows in a single transaction.
 type MessagePersistData struct {
-	Message *Message
-	// ResolveAcquisition records a successful Gmail acquisition in the same
-	// transaction as RawMIME. Intentional local deletion still forbids the write.
-	ResolveAcquisition        bool
+	Message                   *Message
 	Conversation              *ConversationPersistData
 	Delivery                  *MessageDeliveryEvidence
 	Metadata                  *sql.NullString
@@ -2369,17 +2366,6 @@ func (s *Store) persistMessageWith(
 	}
 	q := boundQuerier{ctx: ctx, q: tx}
 	message := data.Message
-	if s.syncGeneration != nil || data.ResolveAcquisition {
-		// Scoped acquisition holds the shared identity lock. A purge holds it
-		// exclusively until both its policy and physical removal commit.
-		deleted, err := acquisitionLocallyDeletedWith(q, message.SourceID, message.SourceMessageID)
-		if err != nil {
-			return 0, err
-		}
-		if deleted {
-			return 0, ErrAcquisitionLocallyDeleted
-		}
-	}
 	if data.Conversation != nil {
 		conversationID, err := ensureConversationWithTypePolicy(
 			q, s.dialect, data.Message.SourceID,
@@ -2481,17 +2467,6 @@ func (s *Store) persistMessageWith(
 		fts.MessageID = messageID
 		if err := s.dialect.FTSUpsert(q, fts); err != nil {
 			return 0, fmt.Errorf("upsert fts: %w", err)
-		}
-	}
-	if data.ResolveAcquisition {
-		if len(data.RawMIME) == 0 {
-			return 0, errors.New("resolve acquisition requires persisted RAW MIME")
-		}
-		if err := s.appendAcquisitionReplayDispositionWith(
-			q, message.SourceID, message.SourceMessageID,
-			AcquisitionReplayResolved, "Gmail acquisition RAW persisted",
-		); err != nil {
-			return 0, fmt.Errorf("resolve acquisition with persisted RAW: %w", err)
 		}
 	}
 	return messageID, nil
@@ -3480,10 +3455,7 @@ func (s *Store) ClearMessageRepliesContext(ctx context.Context, sourceID int64, 
 	})
 }
 
-// MarkMessageDeleted marks a message as deleted from the source. For a tracked
-// Gmail acquisition, it records acquisition_source_deleted in the same
-// transaction, even when no message row exists. A journal failure rolls back
-// the tombstone; untracked IDs and other source types add no disposition.
+// MarkMessageDeleted marks a message as deleted from the source.
 func (s *Store) MarkMessageDeleted(sourceID int64, sourceMessageID string) error {
 	return s.MarkMessageDeletedContext(context.Background(), sourceID, sourceMessageID)
 }
@@ -3493,20 +3465,18 @@ func (s *Store) MarkMessageDeletedContext(ctx context.Context, sourceID int64, s
 	if err := s.requireSyncSource(sourceID); err != nil {
 		return err
 	}
-	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+	write := func(q querier) error {
+		_, err := q.Exec(fmt.Sprintf(`
 			UPDATE messages
 			SET deleted_from_source_at = %s
 			WHERE source_id = ? AND source_message_id = ? AND deleted_from_source_at IS NULL
 		`, s.dialect.Now()), sourceID, sourceMessageID)
-		if err != nil {
-			return err
-		}
-		return s.recordAcquisitionReplayDispositionsWith(
-			ctx, tx, sourceID, []string{sourceMessageID}, AcquisitionReplaySourceDeleted,
-			"Gmail source deletion observed",
-		)
-	})
+		return err
+	}
+	if s.syncGeneration == nil {
+		return write(boundQuerier{ctx: ctx, q: s.db})
+	}
+	return s.withTxContext(ctx, func(tx *loggedTx) error { return write(boundQuerier{ctx: ctx, q: tx}) })
 }
 
 // ClearMessageDeletedFromSource clears the upstream tombstone when a message
@@ -3534,10 +3504,7 @@ func (s *Store) ClearMessageDeletedFromSourceContext(ctx context.Context, source
 	return s.withTxContext(ctx, func(tx *loggedTx) error { return write(boundQuerier{ctx: ctx, q: tx}) })
 }
 
-// MarkMessagesDeletedBatch atomically records source tombstones and the Gmail
-// acquisition dispositions described by MarkMessageDeleted. An error rolls back
-// the entire batch. Gmail callers must retain the prior History cursor on failure:
-// delete_error diagnostics alone cannot replay the rolled-back deletions.
+// MarkMessagesDeletedBatch marks multiple messages as deleted from the source in a single transaction.
 func (s *Store) MarkMessagesDeletedBatch(sourceID int64, sourceMessageIDs []string) error {
 	if len(sourceMessageIDs) == 0 {
 		return nil
@@ -3545,24 +3512,20 @@ func (s *Store) MarkMessagesDeletedBatch(sourceID int64, sourceMessageIDs []stri
 	if err := s.requireSyncSource(sourceID); err != nil {
 		return err
 	}
-	return s.withTxContext(context.Background(), func(tx *loggedTx) error {
-		if err := execInChunksContext(context.Background(), tx, sourceMessageIDs, []any{sourceID},
-			fmt.Sprintf(`UPDATE messages SET deleted_from_source_at = %s WHERE source_id = ? AND source_message_id IN (%%s) AND deleted_from_source_at IS NULL`, s.dialect.Now())); err != nil {
-			return err
-		}
-		return s.recordAcquisitionReplayDispositionsWith(
-			context.Background(), tx, sourceID, sourceMessageIDs,
-			AcquisitionReplaySourceDeleted, "Gmail source deletion observed",
-		)
-	})
+	write := func(q chunkQuerier) error {
+		return execInChunks(q, sourceMessageIDs, []any{sourceID},
+			fmt.Sprintf(`UPDATE messages SET deleted_from_source_at = %s WHERE source_id = ? AND source_message_id IN (%%s) AND deleted_from_source_at IS NULL`, s.dialect.Now()))
+	}
+	if s.syncGeneration == nil {
+		return write(s.db)
+	}
+	return s.withTx(func(tx *loggedTx) error { return write(tx) })
 }
 
 // ReconcileSourceMessageSnapshot tombstones locally live messages that are
-// absent from one complete provider snapshot, and acknowledges tracked Gmail
-// acquisitions absent from that inventory even without an archived row. Callers
-// must supply every page of an unfiltered, unlimited source inventory.
-// The sync-scoped Store fences the current generation before any reads or writes.
-// Reconciliation commits its tombstones and acquisition dispositions together.
+// absent from one complete provider snapshot. The sync-scoped Store fences the
+// current generation before reading or writing, and the transaction ensures an
+// incomplete reconciliation cannot publish partial tombstones.
 func (s *Store) ReconcileSourceMessageSnapshot(
 	ctx context.Context, sourceID int64, present map[string]struct{},
 ) (int64, error) {
@@ -3605,28 +3568,6 @@ func (s *Store) ReconcileSourceMessageSnapshot(
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("reconcile source message snapshot: list live messages: %w", err)
 		}
-		var sourceType string
-		if err := tx.QueryRowContext(ctx, "SELECT source_type FROM sources WHERE id=?", sourceID).Scan(&sourceType); err != nil {
-			return err
-		}
-		if sourceType == "gmail" {
-			states, err := s.acquisitionReplayStatesWith(ctx, tx, sourceID)
-			if err != nil {
-				return fmt.Errorf("reconcile acquisition inventory: %w", err)
-			}
-			for id, state := range states {
-				if _, found := present[id]; found || state == acquisitionStateTerminal || state == acquisitionStateLocalDeleted {
-					continue
-				}
-				if err := s.appendAcquisitionReplayDispositionWith(
-					boundQuerier{ctx: ctx, q: tx}, sourceID, id, AcquisitionReplaySourceDeleted,
-					"Gmail message absent from complete source-presence inventory",
-				); err != nil {
-					return fmt.Errorf("reconcile acquisition inventory: %w", err)
-				}
-			}
-		}
-
 		if len(missing) == 0 {
 			return nil
 		}

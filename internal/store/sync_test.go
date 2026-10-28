@@ -1287,3 +1287,70 @@ func TestStore_InterruptSyncWithCheckpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_ListUnresolvedSyncItemErrors(t *testing.T) {
+	f := storetest.New(t)
+	other, err := f.Store.GetOrCreateSource("gmail", "other@example.com")
+	require.NoError(t, err)
+	firstRun := f.StartSync()
+	for _, id := range []string{"retry", "resolved", "gone", "reopened"} {
+		require.NoError(t, f.Store.RecordSyncRunItem(store.SyncRunItem{
+			SyncRunID: firstRun, SourceMessageID: id, Phase: "ingest",
+			Status: store.SyncRunItemStatusError, ErrorKind: "ingest_error",
+		}))
+	}
+	require.NoError(t, f.Store.FailSync(firstRun, "interrupted"))
+	nextRun := f.StartSync()
+	for _, item := range []store.SyncRunItem{
+		{SourceMessageID: "resolved", Phase: "fetch", Status: store.SyncRunItemStatusResolved, ErrorKind: "acquired"},
+		{SourceMessageID: "gone", Phase: "fetch", Status: store.SyncRunItemStatusSkipped, ErrorKind: "gmail_not_found"},
+		{SourceMessageID: "reopened", Phase: "fetch", Status: store.SyncRunItemStatusResolved, ErrorKind: "acquired"},
+		{SourceMessageID: "reopened", Phase: "fetch", Status: store.SyncRunItemStatusError, ErrorKind: "fetch_error"},
+		{SourceMessageID: "retry", Phase: "delete", Status: store.SyncRunItemStatusSkipped, ErrorKind: "delete_error"},
+	} {
+		item.SyncRunID = nextRun
+		require.NoError(t, f.Store.RecordSyncRunItem(item))
+	}
+	require.NoError(t, f.Store.CompleteSync(nextRun, "1000"))
+	otherRun, err := f.Store.StartSync(other.ID, "full")
+	require.NoError(t, err)
+	for _, item := range []store.SyncRunItem{
+		{SourceMessageID: "other-only", Phase: "fetch", Status: store.SyncRunItemStatusError, ErrorKind: "fetch_error"},
+		{SourceMessageID: "retry", Phase: "fetch", Status: store.SyncRunItemStatusResolved, ErrorKind: "acquired"},
+	} {
+		item.SyncRunID = otherRun
+		require.NoError(t, f.Store.RecordSyncRunItem(item))
+	}
+
+	items, err := f.Store.ListUnresolvedSyncItemErrors(context.Background(), f.Source.ID)
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	assert.Equal(t, "retry", items[0].SourceMessageID)
+	assert.Equal(t, "ingest_error", items[0].ErrorKind)
+	assert.Equal(t, firstRun, items[0].SyncRunID)
+	assert.Equal(t, "reopened", items[1].SourceMessageID)
+	assert.Equal(t, "fetch_error", items[1].ErrorKind)
+	assert.Equal(t, nextRun, items[1].SyncRunID)
+
+	boundary, err := f.Store.StartSync(f.Source.ID, "incremental")
+	require.NoError(t, err)
+	require.NoError(t, f.Store.RecordSyncRunItem(store.SyncRunItem{
+		SyncRunID: boundary, SourceMessageID: "still-failing", Phase: "fetch",
+		Status: store.SyncRunItemStatusError, ErrorKind: "fetch_error",
+	}))
+	require.NoError(t, f.Store.CompleteSync(boundary, "1001"))
+	full, err := f.Store.StartSync(f.Source.ID, "full")
+	require.NoError(t, err)
+	require.NoError(t, f.Store.RecordSyncRunItem(store.SyncRunItem{
+		SyncRunID: full, SourceMessageID: "later-full", Phase: "ingest",
+		Status: store.SyncRunItemStatusError, ErrorKind: "ingest_error",
+	}))
+	require.NoError(t, f.Store.CompleteSync(full, "1001"))
+	items, err = f.Store.ListUnresolvedSyncItemErrors(context.Background(), f.Source.ID)
+	require.NoError(t, err)
+	var ids []string
+	for _, item := range items {
+		ids = append(ids, item.SourceMessageID)
+	}
+	assert.ElementsMatch(t, []string{"still-failing", "later-full"}, ids)
+}

@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-27"
+last_edited: "2026-10-20"
 title: Changelog
 description: Release history for msgvault
 ---
@@ -8,14 +8,8 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
-- Gmail sync retains its History cursor when a source-deletion transaction fails,
-  including when its acquisition disposition cannot be recorded. A later sync
-  retries the deletion instead of losing it behind an advanced cursor.
-- Archive schema version 15 adds a partial index for intentional Gmail local
-  deletions, avoiding repeated journal scans during acquisition. Existing
-  archives build it during setup; PostgreSQL builds it concurrently. Embedded
-  readers must support version 15 after the upgrade, even though table layouts
-  are unchanged. See [schema version maintenance](development.md#archive-schema-version-maintenance).
+- Each Gmail incremental sync retries messages earlier syncs couldn't download or save, until they're archived or Gmail reports them gone. Run a full sync to recover failures recorded before the upgrade that this version no longer retries.
+- Media search in Everything, `msgvault media search`, the HTTP API, and MCP now finds text Docbank has extracted from mirrored attachments. A scope with more than 4096 mirrored files excluding images, audio, and video returns `media_search_scope_limit` in `attachments.error`; add a Person filter to narrow the search.
 - Drafts and unsent messages no longer count as contact in last contact and cadence.
 - Vector search, daemon status, and Explore coverage now say to restart when a rebuild activated settings changed after the daemon started.
 - Builds use Go 1.27.3, so IMAP connections reject the compromised intermediate certificates listed in [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809).
