@@ -558,6 +558,16 @@ func (s *Syncer) handleLabelChange(ctx context.Context, syncID, sourceID int64, 
 				checkpoint.ErrorsCount++
 				return false, false, err
 			}
+			// Later label events in this sync must take the existing-message
+			// path, or a transient refetch failure would leave retry debt for a
+			// message that is already archived.
+			ingested, err := s.store.MessageExistsBatch(sourceID, []string{messageID})
+			if err != nil {
+				return false, false, fmt.Errorf("look up ingested message: %w", err)
+			}
+			if id, ok := ingested[messageID]; ok {
+				existingMap[messageID] = id
+			}
 			// The new message gets embed_gen = NULL by column default, so
 			// the scan-and-fill embed worker picks it up automatically — no
 			// sync-time enqueue step is needed.
