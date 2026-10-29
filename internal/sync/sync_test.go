@@ -6063,3 +6063,41 @@ func TestIncrementalSyncSameRunRecoveryThenPurge(t *testing.T) {
 	assert.Zero(summary.MessagesAdded)
 	assert.Empty(env.Mock.GetMessageCalls)
 }
+
+// failingRefetchAPI serves a message's first raw fetch, then fails later ones.
+type failingRefetchAPI struct {
+	*gmail.MockAPI
+}
+
+func (a *failingRefetchAPI) GetMessageRaw(ctx context.Context, id string) (*gmail.RawMessage, error) {
+	raw, err := a.MockAPI.GetMessageRaw(ctx, id)
+	a.GetMessageError[id] = errors.New("temporary fetch failure")
+	return raw, err
+}
+
+func TestIncrementalSyncRepeatedLabelAddAfterIngestThenPurge(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	env := newTestEnv(t)
+	source := env.CreateSourceWithHistory(t, "1000")
+	const id = "label-added-twice"
+	env.Mock.AddMessage(id, testMIME(), []string{"INBOX"})
+	env.Syncer = New(&failingRefetchAPI{env.Mock}, env.Store, nil)
+	event := gmail.HistoryRecord{LabelsAdded: []gmail.HistoryLabelChange{{Message: gmail.MessageID{ID: id, ThreadID: "thread"}, LabelIDs: []string{"INBOX"}}}}
+	env.SetHistory(1001, event, event)
+	summary := runIncrementalSync(t, env)
+	require.Zero(summary.Errors)
+	require.Equal(int64(1), summary.MessagesAdded)
+	assert.Equal([]string{id}, env.Mock.GetMessageCalls)
+	_, err := env.Store.DB().Exec(`UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, delete_batch_id = ? WHERE source_id = ?`, "label-twice", source.ID)
+	require.NoError(err)
+	deleted, err := env.Store.DeleteDedupedBatch("label-twice")
+	require.NoError(err)
+	require.Equal(int64(1), deleted)
+	env.SetHistory(1001)
+	env.Mock.GetMessageCalls = nil
+	summary = runIncrementalSync(t, env)
+	assert.Zero(summary.MessagesAdded)
+	assert.Empty(env.Mock.GetMessageCalls)
+}
