@@ -147,6 +147,7 @@ func (s *Syncer) initAcquisitionReplay(ctx context.Context, sourceID, syncID int
 
 func (s *Syncer) setAcquisitionReplay(syncID int64, ids []string) {
 	s.acquisitionSyncID = syncID
+	s.acquisitionRecordErr = nil
 	s.pendingAcquisitions = make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		s.pendingAcquisitions[id] = struct{}{}
@@ -206,8 +207,9 @@ func syncItemErrorMessage(err error, fallback string) string {
 }
 
 func (s *Syncer) recordSyncItem(syncID int64, sourceMessageID, phase, status, kind string, err error) {
-	if s.pendingAcquisitions != nil && syncID == s.acquisitionSyncID && status == store.SyncRunItemStatusError &&
-		isAcquisitionReplayCandidate(store.SyncRunItem{SourceMessageID: sourceMessageID, Phase: phase, ErrorKind: kind}) {
+	retryable := s.pendingAcquisitions != nil && syncID == s.acquisitionSyncID && status == store.SyncRunItemStatusError &&
+		isAcquisitionReplayCandidate(store.SyncRunItem{SourceMessageID: sourceMessageID, Phase: phase, ErrorKind: kind})
+	if retryable {
 		s.pendingAcquisitions[sourceMessageID] = struct{}{}
 	}
 	if sourceMessageID == "" {
@@ -222,6 +224,9 @@ func (s *Syncer) recordSyncItem(syncID int64, sourceMessageID, phase, status, ki
 		ErrorKind:       kind,
 		ErrorMessage:    errMsg,
 	}); recErr != nil {
+		if retryable && s.acquisitionRecordErr == nil {
+			s.acquisitionRecordErr = fmt.Errorf("record retry for Gmail message %q: %w", sourceMessageID, recErr)
+		}
 		s.logger.Warn("failed to record sync item",
 			"sync_id", syncID,
 			"source_message_id", sourceMessageID,
