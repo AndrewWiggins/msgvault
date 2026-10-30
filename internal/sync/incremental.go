@@ -281,9 +281,9 @@ func (s *Syncer) incrementalWithRecovery(
 					for i, fetch := range rawMessages {
 						raw := fetch.Message
 						if raw == nil {
-							if isGmailNotFound(fetch.Err) {
+							if kind, gone := messageGoneKind(fetch.Err); gone {
 								s.logger.Debug("skipping message deleted before fetch", "id", newMsgIDs[i])
-								s.recordSyncItem(syncID, newMsgIDs[i], syncItemPhaseFetch, store.SyncRunItemStatusSkipped, syncItemKindGmailNotFound, fetch.Err)
+								s.recordSyncItem(syncID, newMsgIDs[i], syncItemPhaseFetch, store.SyncRunItemStatusSkipped, kind, fetch.Err)
 								continue
 							}
 							errMsg := syncItemErrorMessage(fetch.Err, errRawBatchMissing.Error())
@@ -366,9 +366,9 @@ func (s *Syncer) incrementalWithRecovery(
 		s.drainIdentityDiscoveryBacklog(ctx, source.ID)
 	}
 
-	// Always advance the cursor so a single permanently-failing
-	// message doesn't block all future incremental syncs.
-	// Failed fetches carry forward to the next incremental run.
+	// Advance past item errors, including during recovery catch-up, so one
+	// permanently failing message cannot block the source. Failed fetches carry
+	// forward to the next incremental run.
 	historyIDStr := strconv.FormatUint(profile.HistoryID, 10)
 	if checkpoint.ErrorsCount > 0 {
 		s.logger.Warn("incremental sync completed with errors",
@@ -543,8 +543,8 @@ func (s *Syncer) handleLabelChange(ctx context.Context, syncID, sourceID int64, 
 			checkpoint.MessagesProcessed++
 			raw, err := s.client.GetMessageRaw(ctx, messageID)
 			if err != nil {
-				if isGmailNotFound(err) {
-					s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusSkipped, syncItemKindGmailNotFound, err)
+				if kind, gone := messageGoneKind(err); gone {
+					s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusSkipped, kind, err)
 					return false, false, err
 				}
 				s.recordSyncItem(syncID, messageID, syncItemPhaseFetch, store.SyncRunItemStatusError, syncItemKindFetchError, err)
