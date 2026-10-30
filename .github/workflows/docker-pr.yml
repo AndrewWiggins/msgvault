@@ -21,6 +21,10 @@ on:
       - '.github/workflows/docker-pr.yml'
 permissions: read-all
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     cache-mode: read
